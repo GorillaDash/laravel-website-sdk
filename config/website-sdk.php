@@ -29,6 +29,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Website public key
+    |--------------------------------------------------------------------------
+    |
+    | The GorillaDash Website "public key". Not used for GraphQL auth — it
+    | authenticates the cache-clear webhook below, so GorillaDash can flush this
+    | site's cache when content changes.
+    |
+    */
+    'public_key' => env('GD_WEBSITE_PUBLIC_KEY'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Stale-while-revalidate freshness window (seconds)
     |--------------------------------------------------------------------------
     |
@@ -62,6 +74,32 @@ return [
     |
     */
     'stale_retention_multiplier' => (int) env('GD_WEBSITE_STALE_RETENTION', 100),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Maximum stale age (seconds)
+    |--------------------------------------------------------------------------
+    |
+    | A hard ceiling on how old cached data may be served. Past this age the
+    | cache is no longer served stale — the request blocks and fetches fresh
+    | (falling back to the stale copy only if that fetch fails). Set to 0/null
+    | to disable (pure stale-while-revalidate). Default: 1 day.
+    |
+    */
+    'max_stale_age' => (int) env('GD_WEBSITE_MAX_STALE_AGE', 86400),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cache-clear webhook
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, the package registers a route that flushes this site's cache
+    | when called with ?key={public_key}. Point GorillaDash's "Cache Clear URL"
+    | at {your-site}/{clear_cache_path}?key={public_key}.
+    |
+    */
+    'register_clear_cache_route' => (bool) env('GD_WEBSITE_CLEAR_CACHE_ROUTE', true),
+    'clear_cache_path' => env('GD_WEBSITE_CLEAR_CACHE_PATH', 'gorilla-dash/clear-cache'),
 
     /*
     |--------------------------------------------------------------------------

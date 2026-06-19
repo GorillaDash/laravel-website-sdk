@@ -81,6 +81,15 @@ class WebsiteClient
     }
 
     /**
+     * Invalidate all cached content for this site (e.g. from a GorillaDash
+     * cache-clear webhook). Cheap and store-agnostic.
+     */
+    public function flush(): void
+    {
+        $this->makeCache()->flush();
+    }
+
+    /**
      * websiteInfo — the current authenticated website. (No `id` field exists on
      * this type.)
      *

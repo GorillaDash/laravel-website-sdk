@@ -16,10 +16,12 @@ final readonly class Connection
         public string $baseUri,
         public ?string $clientId,
         public ?string $clientSecret,
+        public ?string $publicKey = null,
         public int $cacheTtl = 60,
         public ?string $cacheStore = null,
         public string $cachePrefix = 'gd_website:',
         public int $staleRetentionMultiplier = 100,
+        public int $maxStaleAge = 86400,
         public int $tokenSkew = 60,
         public int $httpTimeout = 10,
     ) {}
@@ -33,10 +35,12 @@ final readonly class Connection
             baseUri: rtrim((string) ($config['base_uri'] ?? ''), '/'),
             clientId: $config['client_id'] ?? null,
             clientSecret: $config['client_secret'] ?? null,
+            publicKey: $config['public_key'] ?? null,
             cacheTtl: (int) ($config['cache_ttl'] ?? 60),
             cacheStore: $config['cache_store'] ?? null,
             cachePrefix: (string) ($config['cache_prefix'] ?? 'gd_website:'),
             staleRetentionMultiplier: (int) ($config['stale_retention_multiplier'] ?? 100),
+            maxStaleAge: (int) ($config['max_stale_age'] ?? 86400),
             tokenSkew: (int) ($config['token_skew'] ?? 60),
             httpTimeout: (int) ($config['http_timeout'] ?? 10),
         );
@@ -53,12 +57,14 @@ final readonly class Connection
             baseUri: isset($overrides['base_uri']) ? rtrim((string) $overrides['base_uri'], '/') : $this->baseUri,
             clientId: $overrides['client_id'] ?? $this->clientId,
             clientSecret: $overrides['client_secret'] ?? $this->clientSecret,
+            publicKey: $overrides['public_key'] ?? $this->publicKey,
             cacheTtl: isset($overrides['cache_ttl']) ? (int) $overrides['cache_ttl'] : $this->cacheTtl,
             cacheStore: array_key_exists('cache_store', $overrides) ? $overrides['cache_store'] : $this->cacheStore,
             cachePrefix: isset($overrides['cache_prefix']) ? (string) $overrides['cache_prefix'] : $this->cachePrefix,
             staleRetentionMultiplier: isset($overrides['stale_retention_multiplier'])
                 ? (int) $overrides['stale_retention_multiplier']
                 : $this->staleRetentionMultiplier,
+            maxStaleAge: isset($overrides['max_stale_age']) ? (int) $overrides['max_stale_age'] : $this->maxStaleAge,
             tokenSkew: isset($overrides['token_skew']) ? (int) $overrides['token_skew'] : $this->tokenSkew,
             httpTimeout: isset($overrides['http_timeout']) ? (int) $overrides['http_timeout'] : $this->httpTimeout,
         );

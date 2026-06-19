@@ -41,6 +41,59 @@ it('serves a fresh cache hit without calling the API again', function () {
         ->and(graphqlCallCount())->toBe(1);
 });
 
+it('flush invalidates cached content so the next read refetches', function () {
+    fakeGd();
+    $client = app(WebsiteClient::class);
+
+    $client->graphqlWithMeta('{ websiteInfo { id } }'); // miss -> stores
+    expect($client->graphqlWithMeta('{ websiteInfo { id } }')['status'])->toBe('fresh');
+    expect(graphqlCallCount())->toBe(1);
+
+    $client->flush();
+
+    // Version bumped -> previous key unreachable -> miss again.
+    expect($client->graphqlWithMeta('{ websiteInfo { id } }')['status'])->toBe('miss');
+    expect(graphqlCallCount())->toBe(2);
+});
+
+it('forces a blocking refetch once past max_stale_age', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+        'gd.test/graphql' => Http::sequence()
+            ->push(['data' => ['websiteInfo' => ['name' => 'Old']]])
+            ->push(['data' => ['websiteInfo' => ['name' => 'New']]]),
+    ]);
+
+    $client = app(WebsiteClient::class)->connection(['cache_ttl' => 60, 'max_stale_age' => 100]);
+
+    expect($client->graphqlWithMeta('{ websiteInfo { name } }')['data']['websiteInfo']['name'])->toBe('Old');
+
+    $this->travel(120)->seconds();
+
+    $result = $client->graphqlWithMeta('{ websiteInfo { name } }');
+    expect($result['status'])->toBe('miss')
+        ->and($result['data']['websiteInfo']['name'])->toBe('New')
+        ->and(graphqlCallCount())->toBe(2);
+});
+
+it('falls back to stale when the forced refetch fails', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+        'gd.test/graphql' => Http::sequence()
+            ->push(['data' => ['websiteInfo' => ['name' => 'Old']]])
+            ->push(['message' => 'boom'], 500),
+    ]);
+
+    $client = app(WebsiteClient::class)->connection(['cache_ttl' => 60, 'max_stale_age' => 100]);
+
+    $client->graphqlWithMeta('{ websiteInfo { name } }'); // miss -> 'Old'
+    $this->travel(120)->seconds();
+
+    $result = $client->graphqlWithMeta('{ websiteInfo { name } }');
+    expect($result['status'])->toBe('stale')
+        ->and($result['data']['websiteInfo']['name'])->toBe('Old');
+});
+
 it('serves stale immediately and refreshes once after the response', function () {
     fakeGd();
     // ttl 0 => the stored value is stale on the very next read.

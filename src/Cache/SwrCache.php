@@ -9,19 +9,26 @@ use GorillaDash\WebsiteSdk\Connection;
 use GorillaDash\WebsiteSdk\Support\AfterResponseRefresher;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Throwable;
 
 /**
  * Stale-while-revalidate cache.
  *
- * Three states for every key:
- *   1. Miss          — block, fetch, store, return.
- *   2. Fresh hit     — age < ttl: return cached, no fetch.
- *   3. Stale hit     — age >= ttl: return cached immediately AND schedule a
- *                      background refresh (after the response is sent).
+ * States for every key:
+ *   1. Miss              — block, fetch, store, return.
+ *   2. Fresh hit         — age < ttl: return cached, no fetch.
+ *   3. Stale hit         — ttl <= age < max_stale_age: return cached immediately
+ *                          AND schedule a background refresh.
+ *   4. Beyond max age    — age >= max_stale_age: block and fetch fresh (falling
+ *                          back to the stale copy only if that fetch fails).
  *
- * Cached payloads are retained far longer than the freshness window so stale
- * data is always available to serve while a refresh runs. Staleness is derived
- * from a stored `cached_at` timestamp, never from cache eviction.
+ * Cached payloads are retained well past the freshness window (and at least as
+ * long as max_stale_age) so stale data is available to serve while a refresh
+ * runs. Staleness is derived from a stored `cached_at` timestamp, never from
+ * cache eviction.
+ *
+ * All keys are namespaced by a per-site version token, so {@see flush()} can
+ * invalidate every cached query at once on any cache store (no tags required).
  */
 class SwrCache
 {
@@ -54,10 +61,31 @@ class SwrCache
             return $envelope + ['age' => $age, 'status' => 'fresh'];
         }
 
+        // 4. Beyond the hard ceiling — force a blocking refresh, but degrade to
+        // the stale copy if the live fetch fails (an outage shouldn't 500).
+        $maxStale = $this->connection->maxStaleAge;
+        if ($maxStale > 0 && $age >= $maxStale) {
+            try {
+                return $this->fetchAndStore($key, $fetcher, status: 'miss');
+            } catch (Throwable) {
+                return $envelope + ['age' => $age, 'status' => 'stale'];
+            }
+        }
+
         // 3. Stale hit — serve cached now, refresh in the background.
         $this->scheduleRefresh($key, $fetcher);
 
         return $envelope + ['age' => $age, 'status' => 'stale'];
+    }
+
+    /**
+     * Invalidate every cached query for this site by bumping the version token.
+     * Old keys become unreachable immediately and expire on their own. Does not
+     * touch the cached bearer token.
+     */
+    public function flush(): void
+    {
+        $this->cache->forever($this->versionKey(), $this->version() + 1);
     }
 
     /**
@@ -106,10 +134,7 @@ class SwrCache
         });
     }
 
-    /**
-     * @param  mixed  $envelope
-     */
-    private function isValidEnvelope($envelope): bool
+    private function isValidEnvelope(mixed $envelope): bool
     {
         return is_array($envelope)
             && array_key_exists('data', $envelope)
@@ -119,9 +144,13 @@ class SwrCache
     private function retentionSeconds(): int
     {
         $multiplier = $this->connection->staleRetentionMultiplier;
+        $base = $multiplier <= 0 ? 315360000 : max($this->connection->cacheTtl, 1) * $multiplier;
 
-        // 0 = retain forever.
-        return $multiplier <= 0 ? 315360000 : max($this->connection->cacheTtl, 1) * $multiplier;
+        // The entry must outlive max_stale_age so it can be force-refreshed (and
+        // used as a fallback). Keep generous headroom beyond the ceiling.
+        $maxStale = $this->connection->maxStaleAge;
+
+        return $maxStale > 0 ? max($base, $maxStale * 2) : $base;
     }
 
     /**
@@ -130,12 +159,23 @@ class SwrCache
     private function key(array $payloadKey): string
     {
         return $this->connection->cachePrefix
-            .'data:'.$this->connection->fingerprint().':'
+            .'data:'.$this->connection->fingerprint()
+            .':v'.$this->version().':'
             .sha1(json_encode($payloadKey, JSON_THROW_ON_ERROR));
+    }
+
+    private function version(): int
+    {
+        return (int) $this->cache->get($this->versionKey(), 1);
+    }
+
+    private function versionKey(): string
+    {
+        return $this->connection->cachePrefix.'ver:'.$this->connection->fingerprint();
     }
 
     private function now(): int
     {
-        return time();
+        return now()->timestamp;
     }
 }
