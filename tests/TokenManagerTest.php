@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
 use GorillaDash\WebsiteSdk\WebsiteClient;
+use GraphQL\Query;
 use Illuminate\Support\Facades\Http;
 
 it('exchanges credentials once and reuses the cached token', function () {
@@ -13,10 +14,11 @@ it('exchanges credentials once and reuses the cached token', function () {
     ]);
 
     $client = app(WebsiteClient::class);
+    $query = (new Query('websiteInfo'))->setSelectionSet(['id']);
 
-    $client->info('id');
+    $client->graphql($query);
     // Second query forces a fresh GraphQL call by busting cache freshness (ttl 0).
-    $client->connection(['cache_ttl' => 0])->info('id');
+    $client->connection(['cache_ttl' => 0])->graphql($query);
 
     // Token endpoint hit exactly once despite multiple GraphQL requests.
     $tokenCalls = collect(Http::recorded())
@@ -33,7 +35,7 @@ it('throws when credentials are missing', function () {
 
     Http::fake();
 
-    app(WebsiteClient::class)->info('id');
+    app(WebsiteClient::class)->graphql((new Query('websiteInfo'))->setSelectionSet(['id']));
 })->throws(GdRequestException::class);
 
 it('sends the client_credentials grant to the token endpoint', function () {
@@ -42,7 +44,7 @@ it('sends the client_credentials grant to the token endpoint', function () {
         'gd.test/graphql' => Http::response(['data' => []]),
     ]);
 
-    app(WebsiteClient::class)->info('id');
+    app(WebsiteClient::class)->graphql((new Query('websiteInfo'))->setSelectionSet(['id']));
 
     Http::assertSent(function ($request) {
         return str_contains($request->url(), '/oauth/token')

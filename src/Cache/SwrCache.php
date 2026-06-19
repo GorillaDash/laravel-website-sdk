@@ -155,6 +155,8 @@ class SwrCache
 
     /**
      * @param  array<string, mixed>  $payloadKey
+     *
+     * @throws \JsonException
      */
     private function key(array $payloadKey): string
     {

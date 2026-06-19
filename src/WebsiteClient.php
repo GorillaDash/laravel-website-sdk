@@ -6,7 +6,8 @@ namespace GorillaDash\WebsiteSdk;
 
 use GorillaDash\WebsiteSdk\Cache\SwrCache;
 use GorillaDash\WebsiteSdk\Support\AfterResponseRefresher;
-use GorillaDash\WebsiteSdk\Support\QueryBuilder;
+use GraphQL\Query;
+use GraphQL\QueryBuilder\QueryBuilderInterface;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -40,26 +41,30 @@ class WebsiteClient
     }
 
     /**
-     * Run an arbitrary GraphQL query and return its `data` payload (SWR cached).
+     * Run an `mghoneimy/php-graphql-client` query — either a {@see Query} or a
+     * {@see QueryBuilderInterface} — and return its `data` payload (SWR cached).
+     *
+     * For a raw query string, use {@see graphqlWithMeta()} instead.
      *
      * @param  array<string, mixed>  $variables
      * @return array<string, mixed>
      */
-    public function graphql(string $query, array $variables = [], ?int $ttl = null): array
+    public function graphql(Query|QueryBuilderInterface $query, array $variables = [], ?int $ttl = null): array
     {
         return $this->graphqlWithMeta($query, $variables, $ttl)['data'];
     }
 
     /**
-     * As {@see graphql()} but returns the full cache envelope, including
-     * `status` (miss|fresh|stale) and `age` in seconds — useful for debugging
-     * and for surfacing data freshness in the UI.
+     * As {@see graphql()} but accepts a raw query string too, and returns the
+     * full cache envelope — `status` (miss|fresh|stale) and `age` in seconds —
+     * useful for debugging and for surfacing data freshness in the UI.
      *
      * @param  array<string, mixed>  $variables
      * @return array{data: array<string, mixed>, cached_at: int, age: int, status: string}
      */
-    public function graphqlWithMeta(string $query, array $variables = [], ?int $ttl = null): array
+    public function graphqlWithMeta(string|Query|QueryBuilderInterface $query, array $variables = [], ?int $ttl = null): array
     {
+        $query = $this->normalizeQuery($query);
         $transport = $this->makeTransport();
 
         return $this->makeCache()->remember(
@@ -90,105 +95,17 @@ class WebsiteClient
     }
 
     /**
-     * websiteInfo — the current authenticated website. (No `id` field exists on
-     * this type.)
-     *
-     * @return array<string, mixed>
+     * Reduce any accepted query form to the wire string. A query string is the
+     * stable cache key and the only thing the transport sends, so we resolve
+     * builders/objects up-front — before the value is hashed for the cache.
      */
-    public function info(string $fields = 'name url', ?int $ttl = null): array
+    private function normalizeQuery(string|Query|QueryBuilderInterface $query): string
     {
-        return $this->graphql("{ websiteInfo { {$fields} } }", [], $ttl);
-    }
+        if ($query instanceof QueryBuilderInterface) {
+            $query = $query->getQuery();
+        }
 
-    /**
-     * websitePage — a single page by slug.
-     *
-     * @param  array<string, mixed>  $args  Extra GraphQL args (locale, tribe_slug, template).
-     * @return array<string, mixed>
-     */
-    public function page(string $slug, string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websitePage', $fields, ['slug' => $slug] + $args, $ttl);
-    }
-
-    /**
-     * websitePages — list of pages.
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function pages(string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websitePages', $fields, $args, $ttl);
-    }
-
-    /**
-     * websiteSections — sections (and their content/media).
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function sections(string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websiteSections', $fields, $args, $ttl);
-    }
-
-    /**
-     * websiteMenu — a single menu by name.
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function menu(string $name, string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websiteMenu', $fields, ['name' => $name] + $args, $ttl);
-    }
-
-    /**
-     * menus — all website menus (each carries a `menu_json` structure).
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function menus(string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('menus', $fields, $args, $ttl);
-    }
-
-    /**
-     * websiteFaq — FAQ entries.
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function faqs(string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websiteFaq', $fields, $args, $ttl);
-    }
-
-    /**
-     * websiteFaqCategory — FAQ categories.
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    public function faqCategories(string $fields, array $args = [], ?int $ttl = null): array
-    {
-        return $this->run('websiteFaqCategory', $fields, $args, $ttl);
-    }
-
-    /**
-     * Build (via {@see QueryBuilder}) and run a named query with an explicit
-     * field selection and arguments.
-     *
-     * @param  array<string, mixed>  $args
-     * @return array<string, mixed>
-     */
-    private function run(string $queryName, string $fields, array $args, ?int $ttl): array
-    {
-        $built = QueryBuilder::build($queryName, $fields, $args);
-
-        return $this->graphql($built['query'], $built['variables'], $ttl);
+        return (string) $query;
     }
 
     private function makeCache(): SwrCache

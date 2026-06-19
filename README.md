@@ -98,43 +98,38 @@ All options live in `config/website-sdk.php` and are env-driven:
 
 ## Usage
 
+Queries are built with [`mghoneimy/php-graphql-client`](https://github.com/mghoneimy/php-graphql-client)
+(Packagist: `gmostafa/php-graphql-client`, a dependency of this package). `graphql()` takes a
+`Query` (or `QueryBuilderInterface`) object; `graphqlWithMeta()` additionally accepts a raw
+query string.
+
 ```php
 use GorillaDash\WebsiteSdk\Facades\GorillaDash;
+use GraphQL\Query;
+use GraphQL\RawObject;
+use GraphQL\Variable;
 
-// Raw query — returns the GraphQL `data` array (SWR cached):
-$data = GorillaDash::graphql('{ websiteInfo { name url } }');
+// Pass a Query object — returns the GraphQL `data` array (SWR cached):
+$query = (new Query('websiteInfo'))->setSelectionSet(['name', 'url']);
+$data = GorillaDash::graphql($query);
 
-// With variables:
-$data = GorillaDash::graphql(
-    'query ($slug: String) { websitePage(slug: $slug) { name body } }',
-    ['slug' => 'about-us'],
-);
+// With variables — declare them on the query, pass values as the second arg:
+$query = (new Query('websitePage'))
+    ->setVariables([new Variable('slug', 'String', true)])
+    ->setArguments(['slug' => new RawObject('$slug')])
+    ->setSelectionSet(['name', 'body']);
+$data = GorillaDash::graphql($query, ['slug' => 'about-us']);
 
-// With cache metadata (status: miss | fresh | stale, age in seconds):
+// graphqlWithMeta() also accepts a raw query string, and returns the full cache
+// envelope (status: miss | fresh | stale, age in seconds):
 $result = GorillaDash::graphqlWithMeta('{ websiteInfo { name } }');
 // => ['data' => [...], 'cached_at' => 1718..., 'age' => 0, 'status' => 'miss']
 
 // Per-call overrides (different credentials, or a custom TTL):
-$data = GorillaDash::connection(['cache_ttl' => 300])->info('name url');
+$data = GorillaDash::connection(['cache_ttl' => 300])->graphql($query);
 
 // Verify credentials (throws GdRequestException on failure):
 GorillaDash::ping();
-```
-
-### Convenience helpers
-
-Each helper takes an explicit field selection (and optional args + TTL). For any query not
-listed (products, tribes, reviews, articles, …) use `graphql()`.
-
-```php
-GorillaDash::info('name url');
-GorillaDash::page('about-us', 'name slug body contents { name type value }', ['locale' => 'en']);
-GorillaDash::pages('name slug show_in_menu');
-GorillaDash::sections('name contents { name type value }');
-GorillaDash::menu('Main Menu', 'name menu_json');
-GorillaDash::menus('name menu_json');
-GorillaDash::faqs('slug question answer');
-GorillaDash::faqCategories('name sort');
 ```
 
 ## HTTP endpoints
@@ -166,9 +161,10 @@ Transport, auth and GraphQL errors throw `GorillaDash\WebsiteSdk\Exceptions\GdRe
 
 ```php
 use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
+use GraphQL\Query;
 
 try {
-    $info = GorillaDash::info('name url');
+    $info = GorillaDash::graphql((new Query('websiteInfo'))->setSelectionSet(['name', 'url']));
 } catch (GdRequestException $e) {
     $info = null; // render a fallback; $e->graphqlErrors holds GraphQL error details
 }
@@ -180,9 +176,17 @@ Fetch in the controller and pass the data as Inertia props — the cache keeps i
 renders it into the initial HTML:
 
 ```php
+use GraphQL\Query;
+
 return Inertia::render('Home', [
-    'info' => GorillaDash::info('name url'),
-    'menu' => GorillaDash::menu('Main Menu', 'name menu_json'),
+    'info' => GorillaDash::graphql(
+        (new Query('websiteInfo'))->setSelectionSet(['name', 'url'])
+    ),
+    'menu' => GorillaDash::graphql(
+        (new Query('websiteMenu'))
+            ->setArguments(['name' => 'Main Menu'])
+            ->setSelectionSet(['name', 'menu_json'])
+    ),
 ]);
 ```
 
@@ -191,12 +195,15 @@ return Inertia::render('Home', [
 Fake the HTTP layer with Laravel's `Http::fake()` — no real API calls:
 
 ```php
+use GraphQL\Query;
+
 Http::fake([
     'api.gorilladash.com/oauth/token' => Http::response(['access_token' => 'tok', 'expires_in' => 3600]),
     'api.gorilladash.com/graphql' => Http::response(['data' => ['websiteInfo' => ['name' => 'Acme']]]),
 ]);
 
-expect(GorillaDash::info('name'))->toBe(['websiteInfo' => ['name' => 'Acme']]);
+expect(GorillaDash::graphql((new Query('websiteInfo'))->setSelectionSet(['name'])))
+    ->toBe(['websiteInfo' => ['name' => 'Acme']]);
 ```
 
 Run the package test suite:
