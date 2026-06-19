@@ -54,6 +54,11 @@ php artisan vendor:publish --tag=website-sdk-config   # optional
 
 The service provider and the `GorillaDash` facade are auto-discovered.
 
+The provider is built on [spatie/laravel-package-tools](https://github.com/spatie/laravel-package-tools):
+it extends `PackageServiceProvider` and wires everything declaratively in `configurePackage()` —
+the config file (published under the `website-sdk-config` tag) and the cache-clear webhook route
+(`routes/web.php`). Service bindings are registered in the `packageRegistered()` lifecycle hook.
+
 ## Credentials
 
 From the GorillaDash **website API settings** you get three values. Map them as follows — the
@@ -78,10 +83,16 @@ All options live in `config/website-sdk.php` and are env-driven:
 | `base_uri` | `GD_WEBSITE_BASE_URI` | `https://api.gorilladash.com` | API base URL (token + GraphQL). |
 | `client_id` | `GD_WEBSITE_CLIENT_ID` | — | Passport OAuth client id (website "ID"). |
 | `client_secret` | `GD_WEBSITE_CLIENT_SECRET` | — | Passport client secret ("API Access Token"). |
+| `public_key` | `GD_WEBSITE_PUBLIC_KEY` | — | Website public key — authenticates the cache-clear webhook (not GraphQL). |
 | `cache_ttl` | `GD_WEBSITE_CACHE_TTL` | `60` | Freshness window (seconds). |
 | `cache_store` | `GD_WEBSITE_CACHE_STORE` | app default | Laravel cache store to use. |
 | `cache_prefix` | `GD_WEBSITE_CACHE_PREFIX` | `gd_website:` | Cache key prefix. |
 | `stale_retention_multiplier` | `GD_WEBSITE_STALE_RETENTION` | `100` | Stale data kept for `cache_ttl × this` (0 = forever). |
+| `max_stale_age` | `GD_WEBSITE_MAX_STALE_AGE` | `86400` | Hard ceiling on stale age (seconds); past it, block and refetch. 0 = disabled. |
+| `register_graphql_route` | `GD_WEBSITE_GRAPHQL_ROUTE` | `true` | Expose the `POST` GraphQL endpoint. |
+| `graphql_path` | `GD_WEBSITE_GRAPHQL_PATH` | `graphql` | Path for the GraphQL endpoint. |
+| `register_clear_cache_route` | `GD_WEBSITE_CLEAR_CACHE_ROUTE` | `true` | Register the cache-clear webhook. |
+| `clear_cache_path` | `GD_WEBSITE_CLEAR_CACHE_PATH` | `gorilla-dash/clear-cache` | Path for the cache-clear webhook. |
 | `token_skew` | `GD_WEBSITE_TOKEN_SKEW` | `60` | Re-exchange the token this many seconds early. |
 | `http_timeout` | `GD_WEBSITE_HTTP_TIMEOUT` | `10` | Per-request timeout (seconds). |
 
@@ -125,6 +136,29 @@ GorillaDash::menus('name menu_json');
 GorillaDash::faqs('slug question answer');
 GorillaDash::faqCategories('name sort');
 ```
+
+## HTTP endpoints
+
+The package registers two routes (both can be disabled or repathed via config — see the table above):
+
+### `POST /graphql`
+
+A ready-to-use GraphQL endpoint that proxies a `{ query, variables }` body through the SWR
+cache and returns the full envelope (`data` + cache metadata). Useful for client-side / SSR
+fetching without writing a controller:
+
+```bash
+curl -X POST https://your-site.test/graphql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ websiteInfo { name url } }"}'
+# => { "data": { "websiteInfo": {...} }, "cached_at": 1718..., "age": 0, "status": "miss" }
+```
+
+### Cache-clear webhook
+
+GorillaDash calls this when content changes, to flush this site's cache. Point GorillaDash's
+**"Cache Clear URL"** at `{your-site}/gorilla-dash/clear-cache?key={public_key}`; a request whose
+`key` matches `public_key` flushes the cache (any other request gets a `404`).
 
 ## Error handling
 

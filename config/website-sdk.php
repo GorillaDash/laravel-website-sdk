@@ -12,7 +12,7 @@ return [
     | API and the OAuth token endpoint. No trailing slash.
     |
     */
-    'base_uri' => env('GD_WEBSITE_BASE_URI', 'https://api.gorilladash.com'),
+    'base_uri' => env('GD_WEBSITE_BASE_URI', 'https://graphql.gorilladash.com'),
 
     /*
     |--------------------------------------------------------------------------
@@ -100,6 +100,19 @@ return [
     */
     'register_clear_cache_route' => (bool) env('GD_WEBSITE_CLEAR_CACHE_ROUTE', true),
     'clear_cache_path' => env('GD_WEBSITE_CLEAR_CACHE_PATH', 'gorilla-dash/clear-cache'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | GraphQL endpoint
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, the package exposes a POST endpoint that proxies a
+    | { query, variables } body through the SWR cache and returns the full
+    | envelope (data + cache metadata). Handy for client-side / SSR fetching.
+    |
+    */
+    'register_graphql_route' => (bool) env('GD_WEBSITE_GRAPHQL_ROUTE', true),
+    'graphql_path' => env('GD_WEBSITE_GRAPHQL_PATH', 'graphql'),
 
     /*
     |--------------------------------------------------------------------------
