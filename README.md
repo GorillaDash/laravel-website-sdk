@@ -38,15 +38,6 @@ refreshes are guarded by a per-key lock to avoid stampedes.
 
 ## Installation
 
-The SDK is distributed from a private/VCS repository. Add the source, then require it:
-
-```jsonc
-// composer.json
-"repositories": [
-    { "type": "vcs", "url": "git@github.com:gorilladash/laravel-website-sdk.git" }
-]
-```
-
 ```bash
 composer require gorilladash/laravel-website-sdk
 php artisan vendor:publish --tag=website-sdk-config   # optional
