@@ -19,7 +19,9 @@ jobs:
         # cannot be installed there until one side moves.
         php: ['8.3', '8.4', '8.5']
 
-    name: ${{ matrix.php }}
+    # No `name:` on purpose. A matrix job defaults to `<job_id> (<matrix values>)`,
+    # i.e. `ci (8.3)`; setting `name` replaces that whole string, and the check
+    # contexts are what branch protection matches on.
 
     steps:
       - uses: actions/checkout@v4
