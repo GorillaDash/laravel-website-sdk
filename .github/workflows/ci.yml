@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Job name is just "ci" so the per-PR check contexts read `ci (8.3)` … `ci (8.5)`,
+  # matching the convention used across the other GorillaDash repos.
+  ci:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor is 8.3 because that is what composer.json requires. Note the client
+        # apps still declare ^8.2 (their servers default to 8.2.32), so this package
+        # cannot be installed there until one side moves.
+        php: ['8.3', '8.4', '8.5']
+
+    name: ${{ matrix.php }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Install dependencies
+        # Lowest supported PHP resolves against the committed lock file; the newer
+        # versions resolve fresh, so a dependency that quietly drops support for one of
+        # them fails here rather than on a client site.
+        run: |
+          if [ "${{ matrix.php }}" = "8.3" ]; then
+            composer install --no-interaction --prefer-dist
+          else
+            composer update --no-interaction --prefer-dist
+          fi
+
+      - name: Test
+        run: vendor/bin/pest --display-deprecations --display-warnings
