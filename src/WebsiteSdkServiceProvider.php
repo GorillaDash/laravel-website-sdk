@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace GorillaDash\WebsiteSdk;
 
+use GorillaDash\WebsiteSdk\Commands\CheckCommand;
 use GorillaDash\WebsiteSdk\Support\AfterResponseRefresher;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -22,12 +23,15 @@ class WebsiteSdkServiceProvider extends PackageServiceProvider
         $package
             ->name('website-sdk')
             ->hasConfigFile()
-            ->hasRoute('web');
+            ->hasRoute('web')
+            ->hasCommand(CheckCommand::class);
     }
 
     public function packageRegistered(): void
     {
         $this->app->singleton(AfterResponseRefresher::class, fn ($app) => new AfterResponseRefresher($app));
+
+        $this->app->singleton(Connection::class, fn ($app) => Connection::fromConfig($app['config']->get('website-sdk')));
 
         $this->app->singleton(WebsiteClient::class, fn ($app) => new WebsiteClient(
             Connection::fromConfig($app['config']->get('website-sdk')),
