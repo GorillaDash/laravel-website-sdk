@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use GorillaDash\WebsiteSdk\WebsiteClient;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
 function fakeGd(): void
@@ -111,5 +113,51 @@ it('serves stale immediately and refreshes once after the response', function ()
     app()->terminate();
 
     // Exactly one background refresh ran despite two stale reads (lock guard).
+    expect(graphqlCallCount())->toBe(2);
+});
+
+it('serves a repeat read from memory without touching the cache store', function () {
+    fakeGd();
+    $client = app(WebsiteClient::class);
+
+    $client->graphqlWithMeta('{ websiteInfo { id } }');
+
+    // Wipe the store underneath it. A second read that still answers proves it
+    // came from the in-process memo, not the store.
+    Cache::store('array')->flush();
+    Cache::flush();
+
+    $second = $client->graphqlWithMeta('{ websiteInfo { id } }');
+
+    expect($second['status'])->toBe('fresh')
+        ->and($second['data'])->toBe(['websiteInfo' => ['id' => '1']])
+        ->and(graphqlCallCount())->toBe(1);
+});
+
+it('never lets the memo outlive the freshness window', function () {
+    fakeGd();
+    config(['website-sdk.cache_ttl' => 1]);
+    $client = app(WebsiteClient::class);
+
+    $client->graphqlWithMeta('{ websiteInfo { id } }');
+
+    // Past the TTL the memo must stand aside so the normal
+    // stale-while-revalidate path runs instead of serving stale forever.
+    Carbon::setTestNow(now()->addSeconds(5));
+
+    expect($client->graphqlWithMeta('{ websiteInfo { id } }')['status'])->not->toBe('fresh');
+
+    Carbon::setTestNow();
+});
+
+it('flush() clears the memo as well as the store', function () {
+    fakeGd();
+    $client = app(WebsiteClient::class);
+
+    $client->graphqlWithMeta('{ websiteInfo { id } }');
+    $client->flush();
+    $client->graphqlWithMeta('{ websiteInfo { id } }');
+
+    // A flush must reach the API again, not answer from memory.
     expect(graphqlCallCount())->toBe(2);
 });

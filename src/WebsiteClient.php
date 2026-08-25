@@ -22,6 +22,8 @@ use Illuminate\Http\Client\Factory as HttpFactory;
  */
 class WebsiteClient
 {
+    private ?SwrCache $cache = null;
+
     public function __construct(
         private readonly Connection $connection,
         private readonly CacheFactory $cacheFactory,
@@ -122,9 +124,14 @@ class WebsiteClient
         return (string) $query;
     }
 
+    /**
+     * One cache instance per client, so its in-process memo survives between
+     * calls within a request (and, on Octane, between requests in a worker —
+     * freshness is recomputed on every read, so that is safe).
+     */
     private function makeCache(): SwrCache
     {
-        return new SwrCache($this->connection, $this->store(), $this->refresher);
+        return $this->cache ??= new SwrCache($this->connection, $this->store(), $this->refresher);
     }
 
     private function makeTransport(): GraphQlTransport
