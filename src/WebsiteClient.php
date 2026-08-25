@@ -75,6 +75,20 @@ class WebsiteClient
     }
 
     /**
+     * Run a GraphQL mutation (or any query that must NOT be cached) straight
+     * through the transport — no SWR cache read, no background refresh. Use
+     * this for form submissions, bookings and anything with side effects:
+     * a cached mutation would replay a stale result instead of submitting.
+     *
+     * @param  array<string, mixed>  $variables
+     * @return array<string, mixed> The decoded GraphQL `data` payload.
+     */
+    public function mutate(string $query, array $variables = []): array
+    {
+        return $this->makeTransport()->query($query, $variables);
+    }
+
+    /**
      * Exchange credentials for a token and run a trivial query. Returns true on
      * success; lets exceptions bubble so callers can show the real error.
      */

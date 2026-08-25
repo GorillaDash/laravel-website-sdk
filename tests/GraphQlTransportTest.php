@@ -60,3 +60,22 @@ it('accepts an mghoneimy query object and forwards its variables', function () {
             && (array) $request['variables'] === ['slug' => 'home'];
     });
 });
+
+it('mutate() bypasses the cache entirely', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+        'gd.test/graphql' => Http::sequence()
+            ->push(['data' => ['submitEnquiry' => ['1']]])
+            ->push(['data' => ['submitEnquiry' => ['2']]]),
+    ]);
+
+    $client = app(WebsiteClient::class);
+    $first = $client->mutate('mutation { submitEnquiry }');
+    $second = $client->mutate('mutation { submitEnquiry }');
+
+    // Identical payloads must hit the API twice — a cached mutation would
+    // replay the first submission instead of creating a second one.
+    expect($first)->toBe(['submitEnquiry' => ['1']])
+        ->and($second)->toBe(['submitEnquiry' => ['2']]);
+    Http::assertSentCount(3); // 1 token + 2 mutations
+});
