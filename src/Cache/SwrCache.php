@@ -32,6 +32,22 @@ use Throwable;
  */
 class SwrCache
 {
+    /**
+     * Envelopes already read this process, keyed by cache key.
+     *
+     * A page that resolves the same query from two places — a controller and a
+     * component, say — otherwise pays a cache round trip for each. A fresh
+     * envelope held in memory is indistinguishable from a fresh envelope in the
+     * store (freshness is recomputed from `cached_at` on every read), so this
+     * saves the I/O without ever serving something the store would not have.
+     *
+     * @var array<string, array{data: array<string, mixed>, cached_at: int}>
+     */
+    private array $memo = [];
+
+    /** Keeps a long-lived Octane worker from accumulating envelopes forever. */
+    private const MEMO_LIMIT = 50;
+
     public function __construct(
         private readonly Connection $connection,
         private readonly CacheRepository $cache,
@@ -47,6 +63,18 @@ class SwrCache
     {
         $ttl ??= $this->connection->cacheTtl;
         $key = $this->key($payloadKey);
+
+        // 0. Already read this process and still fresh — no store round trip.
+        if (isset($this->memo[$key])) {
+            $memoAge = $this->now() - $this->memo[$key]['cached_at'];
+
+            if ($memoAge < $ttl) {
+                return $this->memo[$key] + ['age' => $memoAge, 'status' => 'fresh'];
+            }
+
+            unset($this->memo[$key]);
+        }
+
         $envelope = $this->cache->get($key);
 
         // 1. Miss — block and fetch.
@@ -58,6 +86,8 @@ class SwrCache
 
         // 2. Fresh hit — serve without touching the API.
         if ($age < $ttl) {
+            $this->memoise($key, $envelope);
+
             return $envelope + ['age' => $age, 'status' => 'fresh'];
         }
 
@@ -85,6 +115,7 @@ class SwrCache
      */
     public function flush(): void
     {
+        $this->memo = [];
         $this->cache->forever($this->versionKey(), $this->version() + 1);
     }
 
@@ -97,8 +128,21 @@ class SwrCache
         $data = $fetcher();
         $envelope = ['data' => $data, 'cached_at' => $this->now()];
         $this->cache->put($key, $envelope, $this->retentionSeconds());
+        $this->memoise($key, $envelope);
 
         return $envelope + ['age' => 0, 'status' => $status];
+    }
+
+    /**
+     * @param  array{data: array<string, mixed>, cached_at: int}  $envelope
+     */
+    private function memoise(string $key, array $envelope): void
+    {
+        if (count($this->memo) >= self::MEMO_LIMIT) {
+            array_shift($this->memo);
+        }
+
+        $this->memo[$key] = ['data' => $envelope['data'], 'cached_at' => (int) $envelope['cached_at']];
     }
 
     /**

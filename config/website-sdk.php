@@ -49,15 +49,28 @@ return [
     | still served immediately and a background refresh is scheduled.
     |
     */
-    'cache_ttl' => (int) env('GD_WEBSITE_CACHE_TTL', 60),
+    'cache_ttl' => (int) env('GD_WEBSITE_CACHE_TTL', 300),
 
     /*
     |--------------------------------------------------------------------------
     | Cache store + key prefix
     |--------------------------------------------------------------------------
     |
-    | Which Laravel cache store to use (null = the app default) and the prefix
-    | applied to every cache key written by this package.
+    | Which Laravel cache store to use, and the prefix applied to every cache
+    | key written by this package.
+    |
+    | Null follows the application's default store, which is what most sites
+    | want. Worth overriding in two cases:
+    |
+    |   - The app caches to the database (Laravel's own default). That puts a
+    |     query — often over the network — in front of every cached read,
+    |     including the bearer token. "file" reads from local disk instead and
+    |     needs nothing provisioned.
+    |   - The site runs on more than one server or pod and you want them to
+    |     share one warm cache: use redis/memcached.
+    |
+    | Reads repeated within a process are answered from memory either way, so
+    | the store is only consulted once per key per freshness window.
     |
     */
     'cache_store' => env('GD_WEBSITE_CACHE_STORE'),
