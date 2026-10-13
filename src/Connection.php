@@ -24,6 +24,7 @@ final readonly class Connection
         public int $maxStaleAge = 86400,
         public int $tokenSkew = 60,
         public int $httpTimeout = 10,
+        public ?string $writeBaseUri = null,
     ) {}
 
     /**
@@ -43,6 +44,7 @@ final readonly class Connection
             maxStaleAge: (int) ($config['max_stale_age'] ?? 86400),
             tokenSkew: (int) ($config['token_skew'] ?? 60),
             httpTimeout: (int) ($config['http_timeout'] ?? 10),
+            writeBaseUri: self::uri($config['write_base_uri'] ?? null),
         );
     }
 
@@ -67,7 +69,32 @@ final readonly class Connection
             maxStaleAge: isset($overrides['max_stale_age']) ? (int) $overrides['max_stale_age'] : $this->maxStaleAge,
             tokenSkew: isset($overrides['token_skew']) ? (int) $overrides['token_skew'] : $this->tokenSkew,
             httpTimeout: isset($overrides['http_timeout']) ? (int) $overrides['http_timeout'] : $this->httpTimeout,
+            writeBaseUri: array_key_exists('write_base_uri', $overrides)
+                ? self::uri($overrides['write_base_uri'])
+                : $this->writeBaseUri,
         );
+    }
+
+    /**
+     * The connection mutations are sent on: this one, aimed at the write host.
+     *
+     * A site that reads from GorillaDash's CDN-fronted read host sends its writes
+     * to GorillaDash itself, because the read host accepts a mutation and then
+     * cannot finish it. With no write host configured, writes go where reads do.
+     * The bearer token is cached per host (see fingerprint()), so each host is
+     * sent a token it issued.
+     */
+    public function forWrites(): self
+    {
+        return $this->writeBaseUri === null ? $this : $this->with(['base_uri' => $this->writeBaseUri]);
+    }
+
+    /** A base URI without its trailing slash; null when blank. */
+    private static function uri(mixed $value): ?string
+    {
+        $uri = rtrim(trim((string) $value), '/');
+
+        return $uri === '' ? null : $uri;
     }
 
     /**

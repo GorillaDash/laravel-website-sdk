@@ -29,6 +29,7 @@ class CheckCommand extends Command
         $this->line('');
         $this->line('  <options=bold>Configuration</>');
         $this->line(sprintf('    base uri      %s', $connection->baseUri));
+        $this->line(sprintf('    write uri     %s', $connection->writeBaseUri ?? $connection->baseUri.' (base uri)'));
         $this->line(sprintf('    client id     %s', $connection->clientId ?: '<fg=red>not set</>'));
         $this->line(sprintf('    client secret %s', $connection->clientSecret ? str_repeat('*', 8) : '<fg=red>not set</>'));
         $this->line(sprintf('    cache store   %s', $connection->cacheStore ?? config('cache.default').' (application default)'));

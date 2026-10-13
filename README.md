@@ -56,7 +56,8 @@ From the GorillaDash **website API settings** you get three values. Map them as 
 public key is **not** used for GraphQL auth:
 
 ```dotenv
-GD_WEBSITE_BASE_URI=https://api.gorilladash.com
+GD_WEBSITE_BASE_URI=https://graphql.gorilladash.com       # reads (the default)
+GD_WEBSITE_WRITE_BASE_URI=https://api.gorilladash.com     # mutate() — see Mutations
 GD_WEBSITE_CLIENT_ID=your-website-id        # the website API "ID"
 GD_WEBSITE_CLIENT_SECRET=your-access-token   # the "API Access Token"
 GD_WEBSITE_CACHE_TTL=60
@@ -71,7 +72,8 @@ All options live in `config/website-sdk.php` and are env-driven:
 
 | Option | Env var | Default | Description |
 |--------|---------|---------|-------------|
-| `base_uri` | `GD_WEBSITE_BASE_URI` | `https://api.gorilladash.com` | API base URL (token + GraphQL). |
+| `base_uri` | `GD_WEBSITE_BASE_URI` | `https://graphql.gorilladash.com` | API base URL for reads (token + GraphQL). |
+| `write_base_uri` | `GD_WEBSITE_WRITE_BASE_URI` | — (`base_uri`) | API base URL for `mutate()`. Set `https://api.gorilladash.com` when `base_uri` is the default — see [Mutations](#mutations). |
 | `client_id` | `GD_WEBSITE_CLIENT_ID` | — | Passport OAuth client id (website "ID"). |
 | `client_secret` | `GD_WEBSITE_CLIENT_SECRET` | — | Passport client secret ("API Access Token"). |
 | `public_key` | `GD_WEBSITE_PUBLIC_KEY` | — | Website public key — authenticates the cache-clear webhook (not GraphQL). |
@@ -122,6 +124,37 @@ $data = GorillaDash::connection(['cache_ttl' => 300])->graphql($query);
 // Verify credentials (throws GdRequestException on failure):
 GorillaDash::ping();
 ```
+
+### Mutations
+
+Anything with a side effect — a form submission, a booking — goes through `mutate()`, never
+`graphql()`. It takes a raw string or a `Mutation` object and returns the `data` payload:
+
+```php
+use GraphQL\Mutation;
+
+$mutation = (new Mutation('submitEnquiry'))
+    ->setVariables([new Variable('email', 'String', true)])
+    ->setArguments(['email' => new RawObject('$email')]);
+
+$data = GorillaDash::mutate($mutation, ['email' => 'mary@example.test']);
+```
+
+Two things make it different from `graphql()`:
+
+- **It is never cached.** `graphql()` answers a repeat of the same query and variables from
+  the cache, and re-sends it in the background once it is stale. For a submission that means
+  the second one is never sent, and a later refresh files it again. `mutate()` sends every
+  call.
+- **It goes to `write_base_uri`** (falling back to `base_uri`). The default read host,
+  `graphql.gorilladash.com`, is GorillaDash's website API on Cloud Run behind a CDN that is
+  purged on publish. It accepts a mutation and cannot finish it: `submitEnquiry` saves the
+  enquiry, then times out reaching the queue the notification emails go to, so the caller
+  gets a timeout and nobody hears about the lead. A site reading from that host sets
+  `GD_WEBSITE_WRITE_BASE_URI=https://api.gorilladash.com`. The same OAuth client works on
+  both hosts, and each is sent a token it issued.
+
+`php artisan gd:check` prints both hosts.
 
 ## HTTP endpoints
 
@@ -218,6 +251,8 @@ Your app ──> GorillaDash facade ──> SwrCache ──> (cache hit? serve)
 - `GraphQlTransport` — sends queries with the bearer token; retries once on a 401 with a fresh token.
 - `SwrCache` — the stale-while-revalidate logic; schedules background refreshes via the
   application's `terminating` callbacks (runs after the response is sent).
+- `mutate()` skips `SwrCache` and sends straight through `GraphQlTransport`, on a connection
+  aimed at `write_base_uri` (`Connection::forWrites()`).
 
 ## License
 
