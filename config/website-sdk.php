@@ -16,6 +16,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Base URI for mutations
+    |--------------------------------------------------------------------------
+    |
+    | Where mutate() sends (form submissions, anything with side effects). Null
+    | sends them to base_uri.
+    |
+    | Set it to https://api.gorilladash.com whenever base_uri is the default,
+    | graphql.gorilladash.com. That host is GorillaDash's website API on Cloud
+    | Run, fronted by a CDN GorillaDash purges on publish, which suits reads. It
+    | accepts a mutation and cannot finish it: submitEnquiry saves the enquiry,
+    | then times out reaching the queue its follow-up jobs (the notification
+    | emails) go to. The caller sees a timeout and nobody is told about the lead.
+    |
+    | It defaults to null rather than to the production write host, so a site or
+    | test suite that points base_uri somewhere else (a sandbox, a dead address)
+    | never has its writes sent to production. The same OAuth client is valid on
+    | both hosts; each is sent a token it issued.
+    |
+    */
+    'write_base_uri' => env('GD_WEBSITE_WRITE_BASE_URI'),
+
+    /*
+    |--------------------------------------------------------------------------
     | OAuth client credentials
     |--------------------------------------------------------------------------
     |

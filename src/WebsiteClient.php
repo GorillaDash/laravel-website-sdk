@@ -82,12 +82,17 @@ class WebsiteClient
      * this for form submissions, bookings and anything with side effects:
      * a cached mutation would replay a stale result instead of submitting.
      *
+     * It is sent to `write_base_uri` when one is configured, else to `base_uri`.
+     * Set it when `base_uri` is graphql.gorilladash.com: that host accepts a
+     * mutation and then cannot finish it (see config/website-sdk.php).
+     *
      * @param  array<string, mixed>  $variables
      * @return array<string, mixed> The decoded GraphQL `data` payload.
      */
-    public function mutate(string $query, array $variables = []): array
+    public function mutate(string|Query|QueryBuilderInterface $query, array $variables = []): array
     {
-        return $this->makeTransport()->query($query, $variables);
+        return $this->makeTransport($this->connection->forWrites())
+            ->query($this->normalizeQuery($query), $variables);
     }
 
     /**
@@ -134,11 +139,12 @@ class WebsiteClient
         return $this->cache ??= new SwrCache($this->connection, $this->store(), $this->refresher);
     }
 
-    private function makeTransport(): GraphQlTransport
+    private function makeTransport(?Connection $connection = null): GraphQlTransport
     {
-        $tokenManager = new TokenManager($this->connection, $this->store(), $this->http);
+        $connection ??= $this->connection;
+        $tokenManager = new TokenManager($connection, $this->store(), $this->http);
 
-        return new GraphQlTransport($this->connection, $tokenManager, $this->http);
+        return new GraphQlTransport($connection, $tokenManager, $this->http);
     }
 
     private function store(): Repository
