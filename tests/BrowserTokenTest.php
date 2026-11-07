@@ -7,10 +7,17 @@ use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
 use GorillaDash\WebsiteSdk\Facades\GorillaDash;
 use GorillaDash\WebsiteSdk\TokenManager;
 use GuzzleHttp\Promise\PromiseInterface;
+use Illuminate\Cache\ArrayStore;
+use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\Store;
+use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\Client\ResponseSequence;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Sleep;
 
@@ -190,16 +197,8 @@ it('gives up after one retry when the new full token is refused too', function (
         '*/oauth/website-browser-token' => Http::response(['message' => 'Unauthenticated.'], $status),
     ]);
 
-    $tokens = app(TokenManager::class);
-
-    expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class, "HTTP {$status}")
+    expect(fn () => app(TokenManager::class)->getBrowserToken())->toThrow(GdRequestException::class, "HTTP {$status}")
         ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2)
-        ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(2);
-
-    // Within the minute a refusal does not mint again, so a host that never
-    // accepts the exchange cannot mint a full token per request.
-    expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class)
-        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(3)
         ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(2);
 })->with('refusals');
 
@@ -264,20 +263,38 @@ it('honours a forced refresh at most once a minute', function () {
         ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(3);
 });
 
-it('uses the token cached by the request that held the exchange lock', function () {
+/** The key TokenManager stores this site's browser token under. */
+function browserTokenKey(): string
+{
+    return 'gd_website:browser-token:'.app(Connection::class)->fingerprint();
+}
+
+/** Take the exchange lock as another request would. */
+function holdExchangeLock(): Lock
+{
+    $lock = Cache::lock(browserTokenKey().':exchange', 40);
+    $lock->get();
+
+    return $lock;
+}
+
+it('waits for the request holding the exchange lock when it has no token at all', function () {
     Http::fake([
         'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
         'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-from-this-request'),
     ]);
 
-    $key = 'gd_website:browser-token:'.app(Connection::class)->fingerprint();
-    $holder = Cache::lock($key.':exchange', 40);
-    $holder->get();
+    $holder = holdExchangeLock();
 
     // While this request waits, the holder finishes its exchange and lets go.
     Sleep::fake();
-    Sleep::whenFakingSleep(function () use ($key, $holder): void {
-        Cache::put($key, ['access_token' => 'browser-from-holder', 'expires_at' => now()->timestamp + 3600], 3000);
+    Sleep::whenFakingSleep(function () use ($holder): void {
+        $now = now()->timestamp;
+        Cache::put(browserTokenKey(), [
+            'access_token' => 'browser-from-holder',
+            'expires_at' => $now + 3600,
+            'refresh_at' => $now + 3000,
+        ], 3600);
         $holder->release();
     });
 
@@ -286,19 +303,244 @@ it('uses the token cached by the request that held the exchange lock', function 
     Http::assertNothingSent();
 });
 
-it('exchanges anyway when the lock wait times out', function () {
-    config()->set('website-sdk.http_timeout', 1);
-    app()->forgetInstance(Connection::class);
-
+it('exchanges on its own when the wait for the lock times out', function () {
     Http::fake([
         'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
         'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
     ]);
 
-    $key = 'gd_website:browser-token:'.app(Connection::class)->fingerprint();
-    Cache::lock($key.':exchange', 40)->get();
+    holdExchangeLock();
     Sleep::fake(syncWithCarbon: true);
 
     expect(app(TokenManager::class)->getBrowserToken())->toBe('browser-1')
         ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(1);
+});
+
+it('returns the previous token at once while another request holds the exchange lock', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+        'gd.test/oauth/website-browser-token' => Http::sequence()
+            ->push(browserTokenBody('browser-1'), 201)
+            ->push(browserTokenBody('browser-2'), 201),
+    ]);
+
+    $tokens = app(TokenManager::class);
+    $tokens->getBrowserToken();
+
+    $this->travel(3000)->seconds();
+    holdExchangeLock();
+    Sleep::fake(syncWithCarbon: true);
+
+    expect($tokens->getBrowserTokenWithExpiry())->toBe(['access_token' => 'browser-1', 'expires_in' => 600])
+        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(1);
+
+    Sleep::assertNeverSlept();
+});
+
+it('refreshes without a lock on a store that has none', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+        'gd.test/oauth/website-browser-token' => Http::sequence()
+            ->push(browserTokenBody('browser-1'), 201)
+            ->push(browserTokenBody('browser-2'), 201),
+    ]);
+
+    $store = new class implements Store
+    {
+        private ArrayStore $items;
+
+        public function __construct()
+        {
+            $this->items = new ArrayStore;
+        }
+
+        public function get($key)
+        {
+            return $this->items->get($key);
+        }
+
+        public function many(array $keys)
+        {
+            return $this->items->many($keys);
+        }
+
+        public function put($key, $value, $seconds)
+        {
+            return $this->items->put($key, $value, $seconds);
+        }
+
+        public function putMany(array $values, $seconds)
+        {
+            return $this->items->putMany($values, $seconds);
+        }
+
+        public function increment($key, $value = 1)
+        {
+            return $this->items->increment($key, $value);
+        }
+
+        public function decrement($key, $value = 1)
+        {
+            return $this->items->decrement($key, $value);
+        }
+
+        public function forever($key, $value)
+        {
+            return $this->items->forever($key, $value);
+        }
+
+        public function forget($key)
+        {
+            return $this->items->forget($key);
+        }
+
+        public function flush()
+        {
+            return $this->items->flush();
+        }
+
+        public function getPrefix()
+        {
+            return '';
+        }
+    };
+
+    expect($store)->not->toBeInstanceOf(LockProvider::class);
+
+    $tokens = new TokenManager(app(Connection::class), new Repository($store), app(HttpFactory::class));
+
+    expect($tokens->getBrowserToken())->toBe('browser-1')
+        ->and($tokens->getBrowserToken())->toBe('browser-1');
+
+    $this->travel(3000)->seconds();
+
+    expect($tokens->getBrowserToken())->toBe('browser-2')
+        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2);
+});
+
+it('exchanges with short timeouts, whatever http_timeout says', function () {
+    config()->set('website-sdk.http_timeout', 30);
+    app()->forgetInstance(Connection::class);
+
+    $options = [];
+    Http::fake(function (Request $request, array $requestOptions) use (&$options) {
+        $options[parse_url($request->url(), PHP_URL_PATH)] = [$requestOptions['timeout'], $requestOptions['connect_timeout']];
+
+        return str_ends_with($request->url(), '/oauth/token')
+            ? Http::response(['access_token' => 'full-1', 'expires_in' => 1296000])
+            : browserTokenResponse('browser-1');
+    });
+
+    app(TokenManager::class)->getBrowserToken();
+
+    expect($options)->toBe([
+        '/oauth/token' => [5, 2],
+        '/oauth/website-browser-token' => [3, 2],
+    ]);
+});
+
+describe('after a failed exchange', function () {
+    beforeEach(function () {
+        Exceptions::fake();
+    });
+
+    it('returns the previous token while it is still valid, and reports the failure once', function () {
+        Http::fake([
+            'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+            'gd.test/oauth/website-browser-token' => Http::sequence()
+                ->push(browserTokenBody('browser-1'), 201)
+                ->push(['message' => 'Server Error'], 500),
+        ]);
+
+        $tokens = app(TokenManager::class);
+        $tokens->getBrowserToken();
+
+        $this->travel(3100)->seconds();
+
+        expect($tokens->getBrowserTokenWithExpiry())->toBe(['access_token' => 'browser-1', 'expires_in' => 500])
+            ->and($tokens->getBrowserToken())->toBe('browser-1')
+            ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2);
+
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(fn (GdRequestException $exception): bool => str_contains($exception->getMessage(), 'HTTP 500'));
+    });
+
+    it('throws when no previous token is valid', function () {
+        Http::fake([
+            'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+            'gd.test/oauth/website-browser-token' => Http::response(['message' => 'Server Error'], 500),
+        ]);
+
+        expect(fn () => app(TokenManager::class)->getBrowserToken())->toThrow(GdRequestException::class, 'HTTP 500');
+
+        Exceptions::assertReportedCount(1);
+    });
+
+    it('makes no request for 30 seconds, forced or not, then tries again', function () {
+        Http::fake([
+            'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+            'gd.test/oauth/website-browser-token' => Http::sequence()
+                ->push(['message' => 'Server Error'], 500)
+                ->push(browserTokenBody('browser-1'), 201),
+        ]);
+
+        $tokens = app(TokenManager::class);
+
+        expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class, 'HTTP 500');
+
+        $this->travel(29)->seconds();
+
+        expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class, 'last exchange failed')
+            ->and(fn () => $tokens->getBrowserToken(forceRefresh: true))->toThrow(GdRequestException::class, 'last exchange failed')
+            ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(1);
+
+        Exceptions::assertReportedCount(1);
+
+        $this->travel(1)->seconds();
+
+        expect($tokens->getBrowserToken())->toBe('browser-1')
+            ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2);
+    });
+
+    it('costs one request and no new full token per 30 seconds when the host never serves the exchange', function () {
+        useBaseUri('https://api.gorilladash.com');
+        Http::fake([
+            '*/oauth/token' => fullTokenSequence(3),
+            '*/oauth/website-browser-token' => Http::response('', 404),
+        ]);
+
+        $tokens = app(TokenManager::class);
+
+        foreach (range(1, 3) as $attempt) {
+            expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class);
+            $this->travel(10)->seconds();
+        }
+
+        $this->travel(1)->seconds();
+        expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class);
+
+        expect(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2)
+            ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(1);
+    });
+});
+
+it('refreshes a short-lived token after a minute, not on every request', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+        'gd.test/oauth/website-browser-token' => Http::sequence()
+            ->push(browserTokenBody('browser-1', 300), 201)
+            ->push(browserTokenBody('browser-2'), 201),
+    ]);
+
+    $tokens = app(TokenManager::class);
+
+    expect($tokens->getBrowserToken())->toBe('browser-1');
+
+    $this->travel(59)->seconds();
+    expect($tokens->getBrowserToken())->toBe('browser-1')
+        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(1);
+
+    $this->travel(1)->seconds();
+    expect($tokens->getBrowserToken())->toBe('browser-2')
+        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(2);
 });

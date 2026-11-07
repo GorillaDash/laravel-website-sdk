@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace GorillaDash\WebsiteSdk;
 
-use Closure;
 use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
@@ -25,7 +24,10 @@ use Throwable;
  * {base_uri}/oauth/website-browser-token. It can only run public queries, so it
  * is the one to put in a page, an Inertia prop or a browser GraphQL client.
  *
- * Both are cached until shortly before they expire.
+ * Both are cached until shortly before they expire. The browser token is read
+ * on every page render, so Gorilla Dash being slow or down must not hold up a
+ * page: its exchange has short timeouts, falls back to the previous token while
+ * that is still valid, and backs off for a while after a failure.
  */
 class TokenManager
 {
@@ -35,11 +37,36 @@ class TokenManager
     /** The only scope a token handed to the browser may carry. */
     private const BROWSER_TOKEN_SCOPE = 'website:read';
 
-    /** A browser token is handed out only while it has at least this many seconds left. */
-    private const BROWSER_TOKEN_MIN_REMAINING = 600;
+    /**
+     * A browser token with less than this many seconds left is due for refresh.
+     * It is still handed out, until it expires, while no newer one can be had.
+     */
+    private const BROWSER_TOKEN_REFRESH_BEFORE = 600;
 
-    /** At most one forced browser-token refresh, and one recovery re-mint, per site in this many seconds. */
-    private const BROWSER_TOKEN_GATE_SECONDS = 60;
+    /** At most one forced browser-token refresh per site in this many seconds. */
+    private const BROWSER_TOKEN_FORCED_REFRESH_SECONDS = 60;
+
+    /** After a failed browser-token exchange, nothing is exchanged for this many seconds. */
+    private const BROWSER_TOKEN_BACKOFF_SECONDS = 30;
+
+    /** The browser-token exchange's timeouts, in seconds; http_timeout does not apply. */
+    private const BROWSER_TOKEN_TIMEOUT = 3;
+
+    private const BROWSER_TOKEN_CONNECT_TIMEOUT = 2;
+
+    /** Timeouts for a full-token mint made on the browser-token path, in seconds. */
+    private const BROWSER_PATH_MINT_TIMEOUT = 5;
+
+    private const BROWSER_PATH_MINT_CONNECT_TIMEOUT = 2;
+
+    /**
+     * Longer than the slowest refresh, a mint, an exchange, a re-mint and a second
+     * exchange each at its timeout, so the lock is never released mid-exchange.
+     */
+    private const BROWSER_TOKEN_LOCK_SECONDS = 20;
+
+    /** How long a request with no valid browser token waits for another request's exchange. */
+    private const BROWSER_TOKEN_LOCK_WAIT_SECONDS = 5;
 
     public function __construct(
         private readonly Connection $connection,
@@ -54,16 +81,7 @@ class TokenManager
      */
     public function getToken(bool $forceRefresh = false): string
     {
-        $key = $this->cacheKey();
-
-        if (! $forceRefresh) {
-            $cached = $this->cache->get($key);
-            if (is_string($cached) && $cached !== '') {
-                return $cached;
-            }
-        }
-
-        return $this->exchange($key);
+        return $this->fullToken($forceRefresh, $this->connection->httpTimeout);
     }
 
     /**
@@ -75,12 +93,17 @@ class TokenManager
     }
 
     /**
-     * Return a read-only browser token, exchanging the full token for one when
-     * none with at least ten minutes left is cached.
+     * Return a read-only browser token, exchanging the full token for a new one
+     * when the cached one has less than ten minutes left.
+     *
+     * While a refresh cannot be had (another request is exchanging, the exchange
+     * failed, or it failed less than 30 seconds ago) the previous token is
+     * returned as long as it is still valid. Throws GdRequestException only when
+     * there is none.
      *
      * @param  bool  $forceRefresh  The browser was refused the last token. Honoured
-     *                              at most once a minute per site; otherwise the
-     *                              cached token is returned.
+     *                              at most once a minute per site, and not during
+     *                              the back-off after a failed exchange.
      */
     public function getBrowserToken(bool $forceRefresh = false): string
     {
@@ -95,34 +118,54 @@ class TokenManager
     public function getBrowserTokenWithExpiry(bool $forceRefresh = false): array
     {
         $key = $this->browserTokenKey();
+        $token = $this->storedBrowserToken($key);
 
-        if ($forceRefresh && ! $this->cache->add($key.':forced', true, self::BROWSER_TOKEN_GATE_SECONDS)) {
-            $forceRefresh = false;
+        if (! $forceRefresh && $this->isFresh($token)) {
+            return $this->present($token);
         }
 
-        if (! $forceRefresh && ($cached = $this->cachedBrowserToken($key)) !== null) {
-            return $cached;
+        if ($this->cache->has($key.':backoff')) {
+            return $this->previousOrFail($token);
         }
 
-        return $this->withExchangeLock($key, function () use ($key, $forceRefresh): array {
-            // Another request may have finished an exchange while this one waited.
-            if (! $forceRefresh && ($cached = $this->cachedBrowserToken($key)) !== null) {
-                return $cached;
-            }
+        $forced = $forceRefresh
+            && $this->cache->add($key.':forced', true, self::BROWSER_TOKEN_FORCED_REFRESH_SECONDS);
 
-            return $this->exchangeBrowserToken($key);
-        });
+        if (! $forced && $this->isFresh($token)) {
+            return $this->present($token);
+        }
+
+        return $this->refreshUnderLock($key, $forced);
     }
 
-    private function exchange(string $key): string
+    private function fullToken(bool $forceRefresh, int $timeout, ?int $connectTimeout = null): string
+    {
+        $key = $this->cacheKey();
+
+        if (! $forceRefresh) {
+            $cached = $this->cache->get($key);
+            if (is_string($cached) && $cached !== '') {
+                return $cached;
+            }
+        }
+
+        return $this->exchange($key, $timeout, $connectTimeout);
+    }
+
+    private function exchange(string $key, int $timeout, ?int $connectTimeout): string
     {
         if (blank($this->connection->clientId) || blank($this->connection->clientSecret)) {
             throw new GdRequestException('GorillaDash client_id / client_secret are not configured.');
         }
 
         try {
-            $response = $this->http
-                ->timeout($this->connection->httpTimeout)
+            $request = $this->http->timeout($timeout);
+
+            if ($connectTimeout !== null) {
+                $request->connectTimeout($connectTimeout);
+            }
+
+            $response = $request
                 ->asForm()
                 ->acceptJson()
                 ->post($this->connection->baseUri.'/oauth/token', [
@@ -153,24 +196,67 @@ class TokenManager
     }
 
     /**
-     * Exchange the full token for a browser token and cache it.
+     * Refresh the browser token, and store it until it expires.
+     *
+     * A failure starts the back-off and is reported once; the previous token is
+     * returned while it is still valid, and the failure thrown otherwise.
+     *
+     * @return array{access_token: string, expires_in: int}
+     */
+    private function refresh(string $key, bool $forced): array
+    {
+        $previous = $this->storedBrowserToken($key);
+
+        // Another request may have finished, or failed, an exchange while this one waited.
+        if (! $forced && $this->isFresh($previous)) {
+            return $this->present($previous);
+        }
+
+        if ($this->cache->has($key.':backoff')) {
+            return $this->previousOrFail($previous);
+        }
+
+        try {
+            $token = $this->exchangeBrowserToken();
+        } catch (Throwable $exception) {
+            $this->cache->put($key.':backoff', true, self::BROWSER_TOKEN_BACKOFF_SECONDS);
+
+            $failure = $exception instanceof GdRequestException
+                ? $exception
+                : new GdRequestException('Browser token exchange failed.', previous: $exception);
+
+            report($failure);
+
+            if ($this->isValid($previous)) {
+                return $this->present($previous);
+            }
+
+            throw $failure;
+        }
+
+        $this->cache->put($key, $token, $token['expires_at'] - now()->timestamp);
+
+        return $this->present($token);
+    }
+
+    /**
+     * Exchange the full token for a browser token.
      *
      * A refused full token (revoked, or the API Access Token was regenerated) is
      * forgotten, a new one minted and the exchange tried once more. A 401 always
      * means refused. A 404 does only on graphql.gorilladash.com, the one host that
      * serves the exchange; anywhere else it means the route is missing, and a new
-     * full token would not help. The re-mint is gated to once a minute per site.
+     * full token would not help.
      *
-     * @return array{access_token: string, expires_in: int}
+     * @return array{access_token: string, expires_at: int, refresh_at: int}
      */
-    private function exchangeBrowserToken(string $key): array
+    private function exchangeBrowserToken(): array
     {
-        $response = $this->requestBrowserToken($this->getToken());
+        $response = $this->requestBrowserToken($this->browserPathFullToken(forceRefresh: false));
 
-        if ($this->fullTokenRefused($response)
-            && $this->cache->add($key.':remint', true, self::BROWSER_TOKEN_GATE_SECONDS)) {
+        if ($this->fullTokenRefused($response)) {
             $this->forget();
-            $response = $this->requestBrowserToken($this->getToken(forceRefresh: true));
+            $response = $this->requestBrowserToken($this->browserPathFullToken(forceRefresh: true));
         }
 
         if ($response->failed()) {
@@ -199,17 +285,21 @@ class TokenManager
         }
 
         $expiresIn = (int) $expiresIn;
+        $now = now()->timestamp;
 
-        // A token that arrives with less than the minimum left is still used, for
-        // at most a minute, so a short lifetime cannot make every request exchange.
-        $ttl = max($expiresIn - self::BROWSER_TOKEN_MIN_REMAINING, min(60, $expiresIn));
-
-        $this->cache->put($key, [
+        return [
             'access_token' => $token,
-            'expires_at' => now()->timestamp + $expiresIn,
-        ], $ttl);
+            'expires_at' => $now + $expiresIn,
+            // A token that arrives with less than ten minutes left is refreshed
+            // after a minute at most, so a short lifetime cannot make every
+            // request exchange.
+            'refresh_at' => $now + max($expiresIn - self::BROWSER_TOKEN_REFRESH_BEFORE, min(60, $expiresIn)),
+        ];
+    }
 
-        return ['access_token' => $token, 'expires_in' => $expiresIn];
+    private function browserPathFullToken(bool $forceRefresh): string
+    {
+        return $this->fullToken($forceRefresh, self::BROWSER_PATH_MINT_TIMEOUT, self::BROWSER_PATH_MINT_CONNECT_TIMEOUT);
     }
 
     private function fullTokenRefused(Response $response): bool
@@ -227,7 +317,8 @@ class TokenManager
     {
         try {
             return $this->http
-                ->timeout($this->connection->httpTimeout)
+                ->timeout(self::BROWSER_TOKEN_TIMEOUT)
+                ->connectTimeout(self::BROWSER_TOKEN_CONNECT_TIMEOUT)
                 ->withToken($fullToken)
                 ->acceptJson()
                 ->post($this->connection->baseUri.'/oauth/website-browser-token');
@@ -237,48 +328,99 @@ class TokenManager
     }
 
     /**
-     * @return array{access_token: string, expires_in: int}|null
-     */
-    private function cachedBrowserToken(string $key): ?array
-    {
-        $cached = $this->cache->get($key);
-
-        if (! is_array($cached) || ! is_string($cached['access_token'] ?? null) || $cached['access_token'] === '') {
-            return null;
-        }
-
-        $expiresIn = (int) ($cached['expires_at'] ?? 0) - now()->timestamp;
-
-        return $expiresIn > 0 ? ['access_token' => $cached['access_token'], 'expires_in' => $expiresIn] : null;
-    }
-
-    /**
-     * Run a browser-token exchange under a cache lock, so concurrent requests
-     * share one exchange. Stores without locks, and a wait that times out, run
-     * it unguarded rather than fail the request.
+     * Refresh under a cache lock, so concurrent requests share one exchange.
      *
-     * @template TResult
+     * A request that finds the lock taken does not wait while the previous token
+     * is still valid: it returns that. With no valid token it waits a few
+     * seconds for the other exchange, then refreshes on its own. Stores without
+     * locks refresh unguarded.
      *
-     * @param  Closure(): TResult  $callback
-     * @return TResult
+     * @return array{access_token: string, expires_in: int}
      */
-    private function withExchangeLock(string $key, Closure $callback): mixed
+    private function refreshUnderLock(string $key, bool $forced): array
     {
         $store = $this->cache->getStore();
 
         if (! $store instanceof LockProvider) {
-            return $callback();
+            return $this->refresh($key, $forced);
         }
 
-        // Long enough for four requests: a mint, an exchange, a re-mint and a second exchange.
-        $timeout = max(1, $this->connection->httpTimeout);
-        $lock = $store->lock($key.':exchange', $timeout * 4);
+        $lock = $store->lock($key.':exchange', self::BROWSER_TOKEN_LOCK_SECONDS);
+        $refreshed = $lock->get(fn (): array => $this->refresh($key, $forced));
+
+        if (is_array($refreshed)) {
+            return $refreshed;
+        }
+
+        $previous = $this->storedBrowserToken($key);
+
+        if ($this->isValid($previous)) {
+            return $this->present($previous);
+        }
 
         try {
-            return $lock->block($timeout * 2, $callback);
+            return $lock->block(self::BROWSER_TOKEN_LOCK_WAIT_SECONDS, fn (): array => $this->refresh($key, $forced));
         } catch (LockTimeoutException) {
-            return $callback();
+            return $this->refresh($key, $forced);
         }
+    }
+
+    /**
+     * @return array{access_token: string, expires_at: int, refresh_at: int}|null
+     */
+    private function storedBrowserToken(string $key): ?array
+    {
+        $token = $this->cache->get($key);
+
+        $wellFormed = is_array($token)
+            && is_string($token['access_token'] ?? null) && $token['access_token'] !== ''
+            && is_int($token['expires_at'] ?? null)
+            && is_int($token['refresh_at'] ?? null);
+
+        return $wellFormed ? $token : null;
+    }
+
+    /**
+     * @param  array{access_token: string, expires_at: int, refresh_at: int}|null  $token
+     */
+    private function isFresh(?array $token): bool
+    {
+        return $token !== null && now()->timestamp < $token['refresh_at'];
+    }
+
+    /**
+     * @param  array{access_token: string, expires_at: int, refresh_at: int}|null  $token
+     */
+    private function isValid(?array $token): bool
+    {
+        return $token !== null && now()->timestamp < $token['expires_at'];
+    }
+
+    /**
+     * @param  array{access_token: string, expires_at: int, refresh_at: int}|null  $token
+     * @return array{access_token: string, expires_in: int}
+     */
+    private function previousOrFail(?array $token): array
+    {
+        if ($this->isValid($token)) {
+            return $this->present($token);
+        }
+
+        throw new GdRequestException(
+            'No browser token: the last exchange failed less than '.self::BROWSER_TOKEN_BACKOFF_SECONDS.' seconds ago.',
+        );
+    }
+
+    /**
+     * @param  array{access_token: string, expires_at: int, refresh_at: int}  $token
+     * @return array{access_token: string, expires_in: int}
+     */
+    private function present(array $token): array
+    {
+        return [
+            'access_token' => $token['access_token'],
+            'expires_in' => max(0, $token['expires_at'] - now()->timestamp),
+        ];
     }
 
     private function cacheKey(): string
