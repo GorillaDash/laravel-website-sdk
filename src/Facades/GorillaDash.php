@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static \GorillaDash\WebsiteSdk\WebsiteClient connection(array $overrides)
  * @method static array graphql(\GraphQL\Query|\GraphQL\QueryBuilder\QueryBuilderInterface $query, array $variables = [], ?int $ttl = null)
  * @method static array graphqlWithMeta(string|\GraphQL\Query|\GraphQL\QueryBuilder\QueryBuilderInterface $query, array $variables = [], ?int $ttl = null)
+ * @method static array browserGraphqlWithMeta(string|\GraphQL\Query|\GraphQL\QueryBuilder\QueryBuilderInterface $query, array $variables = [], ?int $ttl = null)
  * @method static array mutate(string|\GraphQL\Query|\GraphQL\QueryBuilder\QueryBuilderInterface $query, array $variables = [])
  * @method static string browserToken(bool $forceRefresh = false)
  * @method static array browserTokenWithExpiry(bool $forceRefresh = false)

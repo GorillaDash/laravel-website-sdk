@@ -57,12 +57,15 @@ class SwrCache
     /**
      * @param  array<string, mixed>  $payloadKey  Stable data used to build the cache key.
      * @param  Closure():array<string, mixed>  $fetcher  Performs the live API call.
+     * @param  string  $namespace  Keeps answers fetched with different tokens apart:
+     *                             `data` for the full token, `browser-data` for the
+     *                             browser token. {@see flush()} clears both.
      * @return array{data: array<string, mixed>, cached_at: int, age: int, status: string}
      */
-    public function remember(array $payloadKey, Closure $fetcher, ?int $ttl = null): array
+    public function remember(array $payloadKey, Closure $fetcher, ?int $ttl = null, string $namespace = 'data'): array
     {
         $ttl ??= $this->connection->cacheTtl;
-        $key = $this->key($payloadKey);
+        $key = $this->key($payloadKey, $namespace);
 
         // 0. Already read this process and still fresh — no store round trip.
         if (isset($this->memo[$key])) {
@@ -202,10 +205,10 @@ class SwrCache
      *
      * @throws \JsonException
      */
-    private function key(array $payloadKey): string
+    private function key(array $payloadKey, string $namespace): string
     {
         return $this->connection->cachePrefix
-            .'data:'.$this->connection->fingerprint()
+            .$namespace.':'.$this->connection->fingerprint()
             .':v'.$this->version().':'
             .sha1(json_encode($payloadKey, JSON_THROW_ON_ERROR));
     }
