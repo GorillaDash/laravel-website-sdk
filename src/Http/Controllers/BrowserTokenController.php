@@ -26,9 +26,8 @@ class BrowserTokenController
     {
         try {
             $response = response()->json($this->client->browserTokenWithExpiry($request->boolean('refresh')));
-        } catch (GdRequestException $exception) {
-            report($exception);
-
+        } catch (GdRequestException) {
+            // TokenManager has already reported the failed exchange.
             $response = response()->json(['message' => 'A browser token is not available right now.'], 503);
         }
 
