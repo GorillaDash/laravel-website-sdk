@@ -9,7 +9,7 @@ function fakeBrowserTokenExchange(string ...$tokens): void
     $sequence = Http::sequence();
 
     foreach ($tokens as $token) {
-        $sequence->push(['status' => 201, 'success' => true, 'data' => ['access_token' => $token, 'expires_in' => 3600]], 201);
+        $sequence->push(['status' => 201, 'success' => true, 'data' => ['scope' => 'website:read', 'access_token' => $token, 'expires_in' => 3600]], 201);
     }
 
     Http::fake([
