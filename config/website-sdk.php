@@ -139,19 +139,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | GraphQL endpoint
+    | GraphQL proxy endpoint
     |--------------------------------------------------------------------------
     |
     | When enabled, the package exposes a POST endpoint that proxies a
     | { query, variables } body through the SWR cache and returns the full
-    | envelope (data + cache metadata). Handy for client-side / SSR fetching.
+    | envelope (data + cache metadata).
     |
-    | It sends the full website token on behalf of anyone who can reach it, so
-    | it runs queries only (mutations and subscriptions get a 403) and is rate
-    | limited per IP address (requests a minute; 0 turns the limit off).
+    | Off by default. It sends the full website token on behalf of anyone who
+    | can reach it, so it runs queries only (mutations and subscriptions get a
+    | 403) and is rate limited per IP address (requests a minute; 0 turns the
+    | limit off). Browser code that queries Gorilla Dash is better served by
+    | a browser token (GorillaDash::browserToken()) sent straight to base_uri.
     |
     */
-    'register_graphql_route' => (bool) env('GD_WEBSITE_GRAPHQL_ROUTE', true),
+    'register_graphql_route' => (bool) env('GD_WEBSITE_GRAPHQL_ROUTE', false),
     'graphql_path' => env('GD_WEBSITE_GRAPHQL_PATH', 'graphql'),
     'graphql_rate_limit' => (int) env('GD_WEBSITE_GRAPHQL_RATE_LIMIT', 60),
 

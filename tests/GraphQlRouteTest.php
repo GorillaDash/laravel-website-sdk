@@ -4,6 +4,14 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Http;
 
+it('does not register the graphql proxy by default', function () {
+    Http::fake();
+
+    $this->postJson('/graphql', ['query' => '{ websiteInfo { name } }'])->assertNotFound();
+
+    Http::assertNothingSent();
+});
+
 describe('when a site turns the proxy on', function () {
     beforeEach(function () {
         $this->withPackageRoutes(['website-sdk.register_graphql_route' => true]);

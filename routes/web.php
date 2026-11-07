@@ -13,11 +13,11 @@ use Illuminate\Support\Facades\Route;
 */
 
 /*
-| Default GraphQL endpoint. Runs a POST { query, variables } body through the
-| SWR cache with the full website token, so it refuses anything but a query,
-| and is rate limited per IP address.
+| Optional GraphQL proxy (off by default). Runs a POST { query, variables } body
+| through the SWR cache with the full website token, so it refuses anything but
+| a query, and is rate limited per IP address.
 */
-if (config('website-sdk.register_graphql_route', true)) {
+if (config('website-sdk.register_graphql_route', false)) {
     $graphqlRoute = Route::post(
         config('website-sdk.graphql_path', 'graphql'),
         GraphQlController::class,
