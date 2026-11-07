@@ -29,6 +29,9 @@ use Throwable;
  */
 class TokenManager
 {
+    /** The only host that serves the browser-token exchange. */
+    private const BROWSER_TOKEN_HOST = 'graphql.gorilladash.com';
+
     /** The only scope a token handed to the browser may carry. */
     private const BROWSER_TOKEN_SCOPE = 'website:read';
 
@@ -152,10 +155,11 @@ class TokenManager
     /**
      * Exchange the full token for a browser token and cache it.
      *
-     * A 401 or 404 means the full token was refused (revoked, or the API Access
-     * Token was regenerated), so a new one is minted and the exchange tried once
-     * more. The re-mint is gated to once a minute per site, so a host that never
-     * accepts the exchange cannot turn every request into a new full token.
+     * A refused full token (revoked, or the API Access Token was regenerated) is
+     * forgotten, a new one minted and the exchange tried once more. A 401 always
+     * means refused. A 404 does only on graphql.gorilladash.com, the one host that
+     * serves the exchange; anywhere else it means the route is missing, and a new
+     * full token would not help. The re-mint is gated to once a minute per site.
      *
      * @return array{access_token: string, expires_in: int}
      */
@@ -163,7 +167,7 @@ class TokenManager
     {
         $response = $this->requestBrowserToken($this->getToken());
 
-        if (in_array($response->status(), [401, 404], true)
+        if ($this->fullTokenRefused($response)
             && $this->cache->add($key.':remint', true, self::BROWSER_TOKEN_GATE_SECONDS)) {
             $this->forget();
             $response = $this->requestBrowserToken($this->getToken(forceRefresh: true));
@@ -172,8 +176,8 @@ class TokenManager
         if ($response->failed()) {
             $message = "Browser token exchange failed with HTTP {$response->status()}.";
 
-            if ($response->status() === 404 && parse_url($this->connection->baseUri, PHP_URL_HOST) !== 'graphql.gorilladash.com') {
-                $message .= " base_uri is {$this->connection->baseUri}; in production only graphql.gorilladash.com serves the exchange.";
+            if ($response->status() === 404 && ! $this->exchangeHost()) {
+                $message .= " base_uri is {$this->connection->baseUri}; in production only ".self::BROWSER_TOKEN_HOST.' serves the exchange.';
             }
 
             throw new GdRequestException($message);
@@ -206,6 +210,17 @@ class TokenManager
         ], $ttl);
 
         return ['access_token' => $token, 'expires_in' => $expiresIn];
+    }
+
+    private function fullTokenRefused(Response $response): bool
+    {
+        return $response->status() === 401 || ($response->status() === 404 && $this->exchangeHost());
+    }
+
+    /** Whether base_uri is the host that serves the browser-token exchange. */
+    private function exchangeHost(): bool
+    {
+        return parse_url($this->connection->baseUri, PHP_URL_HOST) === self::BROWSER_TOKEN_HOST;
     }
 
     private function requestBrowserToken(string $fullToken): Response

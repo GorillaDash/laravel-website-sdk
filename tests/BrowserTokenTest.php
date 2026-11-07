@@ -149,10 +149,24 @@ it('caches the browser token by expires_in until it has ten minutes left', funct
     'a reused token, fifteen minutes left' => [900, 300],
 ]);
 
-it('forgets a refused full token, mints a new one and retries the exchange once', function (int $status) {
+/** Point base_uri somewhere else, as a site's config would. */
+function useBaseUri(string $baseUri): void
+{
+    config()->set('website-sdk.base_uri', $baseUri);
+    app()->forgetInstance(Connection::class);
+}
+
+dataset('refusals', [
+    '401 from another host' => [401, 'https://gd.test'],
+    '401 from graphql.gorilladash.com' => [401, 'https://graphql.gorilladash.com'],
+    '404 from graphql.gorilladash.com' => [404, 'https://graphql.gorilladash.com'],
+]);
+
+it('forgets a refused full token, mints a new one and retries the exchange once', function (int $status, string $baseUri) {
+    useBaseUri($baseUri);
     Http::fake([
-        'gd.test/oauth/token' => fullTokenSequence(2),
-        'gd.test/oauth/website-browser-token' => Http::sequence()
+        '*/oauth/token' => fullTokenSequence(2),
+        '*/oauth/website-browser-token' => Http::sequence()
             ->push(['message' => 'Unauthenticated.'], $status)
             ->push(browserTokenBody('browser-1'), 201),
     ]);
@@ -162,16 +176,18 @@ it('forgets a refused full token, mints a new one and retries the exchange once'
     $exchanges = recordedRequestsTo('/oauth/website-browser-token');
 
     expect($exchanges)->toHaveCount(2)
+        ->and($exchanges[0]->url())->toBe($baseUri.'/oauth/website-browser-token')
         ->and($exchanges[0]->header('Authorization'))->toBe(['Bearer full-1'])
         ->and($exchanges[1]->header('Authorization'))->toBe(['Bearer full-2'])
         ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(2)
         ->and(app(TokenManager::class)->getToken())->toBe('full-2');
-})->with([401, 404]);
+})->with('refusals');
 
-it('gives up after one retry when the new full token is refused too', function (int $status) {
+it('gives up after one retry when the new full token is refused too', function (int $status, string $baseUri) {
+    useBaseUri($baseUri);
     Http::fake([
-        'gd.test/oauth/token' => fullTokenSequence(3),
-        'gd.test/oauth/website-browser-token' => Http::response(['message' => 'Unauthenticated.'], $status),
+        '*/oauth/token' => fullTokenSequence(3),
+        '*/oauth/website-browser-token' => Http::response(['message' => 'Unauthenticated.'], $status),
     ]);
 
     $tokens = app(TokenManager::class);
@@ -185,16 +201,22 @@ it('gives up after one retry when the new full token is refused too', function (
     expect(fn () => $tokens->getBrowserToken())->toThrow(GdRequestException::class)
         ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(3)
         ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(2);
-})->with([401, 404]);
+})->with('refusals');
 
-it('names the host when the exchange is not found', function () {
+it('does not mint a new full token for a 404 from a host that does not serve the exchange', function () {
+    useBaseUri('https://api.gorilladash.com');
     Http::fake([
-        'gd.test/oauth/token' => fullTokenSequence(2),
-        'gd.test/oauth/website-browser-token' => Http::response('', 404),
+        '*/oauth/token' => fullTokenSequence(2),
+        '*/oauth/website-browser-token' => Http::response('', 404),
     ]);
 
-    app(TokenManager::class)->getBrowserToken();
-})->throws(GdRequestException::class, 'base_uri is https://gd.test; in production only graphql.gorilladash.com serves the exchange.');
+    expect(fn () => app(TokenManager::class)->getBrowserToken())->toThrow(
+        GdRequestException::class,
+        'base_uri is https://api.gorilladash.com; in production only graphql.gorilladash.com serves the exchange.',
+    )
+        ->and(recordedRequestsTo('/oauth/website-browser-token'))->toHaveCount(1)
+        ->and(recordedRequestsTo('/oauth/token'))->toHaveCount(1);
+});
 
 it('throws on any other failure without minting a new full token', function () {
     Http::fake([
