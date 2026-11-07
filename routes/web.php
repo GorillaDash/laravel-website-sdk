@@ -4,17 +4,28 @@ declare(strict_types=1);
 
 use GorillaDash\WebsiteSdk\Http\Controllers\ClearCacheController;
 use GorillaDash\WebsiteSdk\Http\Controllers\GraphQlController;
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Facades\Route;
 
 /*
-| Default GraphQL endpoint. Proxies a POST { query, variables } body through the
-| SWR cache and returns the full envelope (data + cache metadata).
+| These routes are loaded outside the `web` middleware group: no session, no
+| cookies, no CSRF. Each one that answers the public carries its own guard.
+*/
+
+/*
+| Default GraphQL endpoint. Runs a POST { query, variables } body through the
+| SWR cache with the full website token, so it refuses anything but a query,
+| and is rate limited per IP address.
 */
 if (config('website-sdk.register_graphql_route', true)) {
-    Route::post(
+    $graphqlRoute = Route::post(
         config('website-sdk.graphql_path', 'graphql'),
         GraphQlController::class,
     )->name('gd-website.graphql');
+
+    if (($limit = (int) config('website-sdk.graphql_rate_limit', 60)) > 0) {
+        $graphqlRoute->middleware(ThrottleRequests::with($limit, 1, 'gd-website-graphql'));
+    }
 }
 
 /*
