@@ -76,15 +76,26 @@ it('exchanges the full token for a browser token on base_uri, never the write ho
     Http::assertNotSent(fn (Request $request): bool => str_starts_with($request->url(), 'https://write.test'));
 });
 
-it('reads a browser token answered without the responder envelope', function () {
+it('never returns a token answered outside the responder envelope', function () {
     Http::fake([
         'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
-        'gd.test/oauth/website-browser-token' => Http::response(['access_token' => 'browser-1', 'expires_in' => 3600], 201),
+        'gd.test/oauth/website-browser-token' => Http::response(['access_token' => 'full-2', 'expires_in' => 3600], 201),
     ]);
 
-    expect(app(TokenManager::class)->getBrowserTokenWithExpiry())
-        ->toBe(['access_token' => 'browser-1', 'expires_in' => 3600]);
-});
+    app(TokenManager::class)->getBrowserToken();
+})->throws(GdRequestException::class, 'did not return data.access_token and data.expires_in');
+
+it('never returns a token without the read-only scope', function (array $data) {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'full-1', 'expires_in' => 1296000]),
+        'gd.test/oauth/website-browser-token' => Http::response(['status' => 201, 'success' => true, 'data' => $data], 201),
+    ]);
+
+    app(TokenManager::class)->getBrowserToken();
+})->with([
+    'a full scope' => [['token_type' => 'Bearer', 'scope' => '*', 'access_token' => 'full-2', 'expires_in' => 3600]],
+    'no scope' => [['token_type' => 'Bearer', 'access_token' => 'browser-1', 'expires_in' => 3600]],
+])->throws(GdRequestException::class, 'without the website:read scope');
 
 it('reuses the cached browser token without a second exchange', function () {
     Http::fake([
@@ -204,9 +215,9 @@ it('throws when the exchange answers without a token or a lifetime', function (a
 
     app(TokenManager::class)->getBrowserToken();
 })->with([
-    'no token' => [['expires_in' => 3600]],
-    'no lifetime' => [['access_token' => 'browser-1']],
-])->throws(GdRequestException::class, 'did not return an access_token and expires_in');
+    'no token' => [['scope' => 'website:read', 'expires_in' => 3600]],
+    'no lifetime' => [['scope' => 'website:read', 'access_token' => 'browser-1']],
+])->throws(GdRequestException::class, 'did not return data.access_token and data.expires_in');
 
 it('honours a forced refresh at most once a minute', function () {
     Http::fake([

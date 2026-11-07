@@ -29,6 +29,9 @@ use Throwable;
  */
 class TokenManager
 {
+    /** The only scope a token handed to the browser may carry. */
+    private const BROWSER_TOKEN_SCOPE = 'website:read';
+
     /** A browser token is handed out only while it has at least this many seconds left. */
     private const BROWSER_TOKEN_MIN_REMAINING = 600;
 
@@ -176,11 +179,19 @@ class TokenManager
             throw new GdRequestException($message);
         }
 
-        $token = $response->json('data.access_token') ?? $response->json('access_token');
-        $expiresIn = $response->json('data.expires_in') ?? $response->json('expires_in');
+        // Only the responder envelope carries a browser token. A bare access_token
+        // is the shape /oauth/token answers with, i.e. a full token.
+        $token = $response->json('data.access_token');
+        $expiresIn = $response->json('data.expires_in');
 
         if (! is_string($token) || $token === '' || ! is_numeric($expiresIn) || (int) $expiresIn <= 0) {
-            throw new GdRequestException('Browser token endpoint did not return an access_token and expires_in.');
+            throw new GdRequestException('Browser token endpoint did not return data.access_token and data.expires_in.');
+        }
+
+        // This token is written into pages, so anything but the read-only scope is
+        // refused rather than published.
+        if ($response->json('data.scope') !== self::BROWSER_TOKEN_SCOPE) {
+            throw new GdRequestException('Browser token endpoint returned a token without the website:read scope.');
         }
 
         $expiresIn = (int) $expiresIn;
