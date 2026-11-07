@@ -23,7 +23,7 @@ puts a cache in front of the API with **stale-while-revalidate** semantics:
 | Cache state | Behaviour |
 |-------------|-----------|
 | **No cache** | Block, fetch from the API, store, return. |
-| **Younger than TTL** (default 60s) | Serve cached. **No API call.** |
+| **Younger than TTL** (default 300s) | Serve cached. **No API call.** |
 | **Older than TTL** | Serve cached **instantly**, and refresh from the API **in the background** (after the response is sent — no queue worker needed). The next request gets the newer data. |
 
 Stale data is retained well past the TTL so there is always something to serve, and background
@@ -66,6 +66,19 @@ GD_WEBSITE_CACHE_TTL=60
 The SDK exchanges these for a bearer token at `{base_uri}/oauth/token`
 (OAuth2 client-credentials grant) and caches the token automatically.
 
+### Two tokens: one for your server, one for the browser
+
+Gorilla Dash accepts two kinds of bearer token, and only one of them may reach a browser.
+
+| Token | Get it with | Use it for |
+|-------|-------------|------------|
+| **Website token** (full) | Handled for you by `graphql()` and `mutate()` | Server rendering and everything with a side effect: enquiries, forms, reviews, sign-ins, orders. It can run every query and mutation, so it never leaves your server. |
+| **Browser token** (read-only) | `GorillaDash::browserToken()` | Anything the browser sees: page HTML, Inertia props, an Apollo client in the browser. It can run public queries only; mutations and per-visitor fields are refused. |
+
+Anyone can copy a token out of a page's source. A copied browser token can read what your
+website already shows, for at most an hour; a copied website token could submit enquiries,
+reviews and orders as your website. See [Browser tokens](#browser-tokens).
+
 ## Configuration
 
 All options live in `config/website-sdk.php` and are env-driven:
@@ -77,13 +90,17 @@ All options live in `config/website-sdk.php` and are env-driven:
 | `client_id` | `GD_WEBSITE_CLIENT_ID` | — | Passport OAuth client id (website "ID"). |
 | `client_secret` | `GD_WEBSITE_CLIENT_SECRET` | — | Passport client secret ("API Access Token"). |
 | `public_key` | `GD_WEBSITE_PUBLIC_KEY` | — | Website public key — authenticates the cache-clear webhook (not GraphQL). |
-| `cache_ttl` | `GD_WEBSITE_CACHE_TTL` | `60` | Freshness window (seconds). |
+| `cache_ttl` | `GD_WEBSITE_CACHE_TTL` | `300` | Freshness window (seconds). |
 | `cache_store` | `GD_WEBSITE_CACHE_STORE` | app default | Laravel cache store to use. |
 | `cache_prefix` | `GD_WEBSITE_CACHE_PREFIX` | `gd_website:` | Cache key prefix. |
 | `stale_retention_multiplier` | `GD_WEBSITE_STALE_RETENTION` | `100` | Stale data kept for `cache_ttl × this` (0 = forever). |
 | `max_stale_age` | `GD_WEBSITE_MAX_STALE_AGE` | `86400` | Hard ceiling on stale age (seconds); past it, block and refetch. 0 = disabled. |
-| `register_graphql_route` | `GD_WEBSITE_GRAPHQL_ROUTE` | `true` | Expose the `POST` GraphQL endpoint. |
-| `graphql_path` | `GD_WEBSITE_GRAPHQL_PATH` | `graphql` | Path for the GraphQL endpoint. |
+| `register_graphql_route` | `GD_WEBSITE_GRAPHQL_ROUTE` | `false` | Expose the `POST` GraphQL proxy (queries only). Off by default since 0.6.0. |
+| `graphql_path` | `GD_WEBSITE_GRAPHQL_PATH` | `graphql` | Path for the GraphQL proxy. |
+| `graphql_rate_limit` | `GD_WEBSITE_GRAPHQL_RATE_LIMIT` | `60` | GraphQL proxy requests a minute per IP address. 0 = no limit. |
+| `register_browser_token_route` | `GD_WEBSITE_BROWSER_TOKEN_ROUTE` | `false` | Expose the `GET` browser-token endpoint. |
+| `browser_token_path` | `GD_WEBSITE_BROWSER_TOKEN_PATH` | `gorilla-dash/browser-token` | Path for the browser-token endpoint. |
+| `browser_token_rate_limit` | `GD_WEBSITE_BROWSER_TOKEN_RATE_LIMIT` | `30` | Browser-token requests a minute per IP address. 0 = no limit. |
 | `register_clear_cache_route` | `GD_WEBSITE_CLEAR_CACHE_ROUTE` | `true` | Register the cache-clear webhook. |
 | `clear_cache_path` | `GD_WEBSITE_CLEAR_CACHE_PATH` | `gorilla-dash/clear-cache` | Path for the cache-clear webhook. |
 | `token_skew` | `GD_WEBSITE_TOKEN_SKEW` | `60` | Re-exchange the token this many seconds early. |
@@ -156,15 +173,96 @@ Two things make it different from `graphql()`:
 
 `php artisan gd:check` prints both hosts.
 
+### Browser tokens
+
+`GorillaDash::browserToken()` returns a read-only token for this website, to hand to the
+browser. The SDK exchanges the website token for it at `{base_uri}/oauth/website-browser-token`
+and caches it until it has ten minutes left, so Gorilla Dash is asked about once an hour
+rather than on every page view. Pages rendered at the same moment share one exchange (a
+cache lock), which matters because the exchange accepts at most 60 requests a minute from
+each website.
+
+```php
+$token = GorillaDash::browserToken();
+// => 'eyJ0eXAiOiJKV1Qi...'
+
+GorillaDash::browserTokenWithExpiry();
+// => ['access_token' => 'eyJ0eXAiOiJKV1Qi...', 'expires_in' => 3312]
+```
+
+The same methods are on `TokenManager` (`getBrowserToken()`, `getBrowserTokenWithExpiry()`)
+for code that already injects it.
+
+Things worth knowing:
+
+- **The exchange always goes to `base_uri`**, never to `write_base_uri`. Only
+  `graphql.gorilladash.com`, the default `base_uri`, serves it; a site whose `base_uri` points
+  at another host gets a `GdRequestException` naming the host.
+- **Pass `forceRefresh: true` when Gorilla Dash refused the last browser token** (the API
+  Access Token was regenerated, or the token was revoked). It is honoured at most once a
+  minute per site, so a visitor cannot use it to spend the exchange budget; within that
+  minute the cached token is returned.
+- **A refused website token is recovered once.** When the exchange answers 401 or 404, the SDK
+  forgets the cached website token, mints a new one and tries the exchange again. If that is
+  refused too, it throws `GdRequestException`, and it mints at most one new website token a
+  minute this way.
+- **A browser token can only run public queries.** Run mutations with `mutate()` and anything
+  that needs the full token with `graphql()`, on your server.
+
+#### Inertia sites
+
+Share the browser token as a prop and point the browser's GraphQL client at `base_uri`. If the
+client asks for that prop alone with a partial reload after Gorilla Dash refuses a token, as
+the client-site starter's Apollo client does, that request is the moment to force a new one:
+
+```php
+// app/Http/Middleware/HandleInertiaRequests.php
+public function share(Request $request): array
+{
+    return [
+        ...parent::share($request),
+        'graphqlURL' => config('website-sdk.base_uri'),
+        // Read-only, so it is safe in the page. Never share the website token here.
+        'graphqlToken' => fn () => rescue(
+            fn () => GorillaDash::browserToken(
+                forceRefresh: $request->header('X-Inertia-Partial-Data') === 'graphqlToken',
+            ),
+            null,
+            report: false,
+        ),
+    ];
+}
+```
+
+If your server-side renderer runs the same GraphQL client with this prop, its queries are
+read-only too, and Gorilla Dash applies the browser token's limits to them. Fetch anything
+that needs the full token in the controller with `GorillaDash::graphql()` and pass it as a prop.
+
+#### Sites without Inertia
+
+Write the token into the page, and turn on the package's browser-token endpoint so browser code
+can ask for a new one without a page load:
+
+```dotenv
+GD_WEBSITE_BROWSER_TOKEN_ROUTE=true
+```
+
+```blade
+<script>window.websiteAccessToken = @json(GorillaDash::browserToken())</script>
+```
+
+See [`GET /gorilla-dash/browser-token`](#get-gorilla-dashbrowser-token-off-by-default) below.
+
 ## HTTP endpoints
 
-The package registers two routes (both can be disabled or repathed via config — see the table above):
+The package can register three routes. Only the cache-clear webhook is on by default; each can
+be turned on or off and repathed via config (see the table above). They are loaded outside the
+`web` middleware group, so they carry no session, cookies or CSRF check.
 
-### `POST /graphql`
+### `POST /graphql` (off by default)
 
-A ready-to-use GraphQL endpoint that proxies a `{ query, variables }` body through the SWR
-cache and returns the full envelope (`data` + cache metadata). Useful for client-side / SSR
-fetching without writing a controller:
+A GraphQL proxy that runs a `{ query, variables }` body through the SWR cache and returns the
+full envelope (`data` + cache metadata):
 
 ```bash
 curl -X POST https://your-site.test/graphql \
@@ -172,6 +270,39 @@ curl -X POST https://your-site.test/graphql \
   -d '{"query":"{ websiteInfo { name url } }"}'
 # => { "data": { "websiteInfo": {...} }, "cached_at": 1718..., "age": 0, "status": "miss" }
 ```
+
+It sends the request to Gorilla Dash with the **full website token**, on behalf of anyone who
+can reach your site, so:
+
+- **It is off unless you set `GD_WEBSITE_GRAPHQL_ROUTE=true`.** Before 0.6.0 it was on by
+  default. A site that published `config/website-sdk.php` keeps whatever that file says:
+  `env('GD_WEBSITE_GRAPHQL_ROUTE', true)` there leaves it on, so change the default to `false`
+  if you do not use it.
+- **It runs queries only.** A document that defines a mutation or a subscription is refused
+  with `403` and a GraphQL-style `errors` body before anything is sent; a body without a
+  well-formed query gets `400`. Send mutations from your server with `mutate()`.
+- **It is rate limited per IP address**, 60 requests a minute by default
+  (`GD_WEBSITE_GRAPHQL_RATE_LIMIT`, `0` for no limit). A site behind a proxy or CDN needs
+  trusted proxies configured, or every visitor shares the proxy's address.
+
+Browser code that queries Gorilla Dash is usually better served by a
+[browser token](#browser-tokens) sent straight to `base_uri`.
+
+### `GET /gorilla-dash/browser-token` (off by default)
+
+Turned on with `GD_WEBSITE_BROWSER_TOKEN_ROUTE=true`. Answers a read-only browser token and the
+seconds it has left, with `Cache-Control: no-store, private` so no browser or shared cache keeps
+it:
+
+```bash
+curl https://your-site.test/gorilla-dash/browser-token
+# => { "access_token": "eyJ0eXAiOiJKV1Qi...", "expires_in": 3312 }
+```
+
+Add `?refresh=1` when Gorilla Dash refused the last token; the forced refresh is honoured at
+most once a minute per site, and the cached token is returned otherwise. When no token can be
+had it answers `503` with a JSON `message`. It is rate limited per IP address, 30 requests a
+minute by default (`GD_WEBSITE_BROWSER_TOKEN_RATE_LIMIT`).
 
 ### Cache-clear webhook
 
@@ -197,7 +328,8 @@ try {
 ## Inertia SSR client sites
 
 Fetch in the controller and pass the data as Inertia props — the cache keeps it fast and SSR
-renders it into the initial HTML:
+renders it into the initial HTML. A token for the browser's own GraphQL client is the
+[browser token](#inertia-sites), never the website token:
 
 ```php
 use GraphQL\Query;
@@ -246,8 +378,9 @@ Your app ──> GorillaDash facade ──> SwrCache ──> (cache hit? serve)
                                                          └─> GraphQlTransport ─> POST /graphql
 ```
 
-- `TokenManager` — exchanges client-credentials for a bearer token and caches it until just
-  before expiry.
+- `TokenManager` — exchanges client-credentials for the website token and caches it until just
+  before expiry; exchanges that for the read-only browser token (`getBrowserToken()`) and
+  caches it until it has ten minutes left.
 - `GraphQlTransport` — sends queries with the bearer token; retries once on a 401 with a fresh token.
 - `SwrCache` — the stale-while-revalidate logic; schedules background refreshes via the
   application's `terminating` callbacks (runs after the response is sent).
