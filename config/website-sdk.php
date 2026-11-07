@@ -159,6 +159,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Browser token endpoint
+    |--------------------------------------------------------------------------
+    |
+    | When enabled, the package exposes a GET endpoint that answers
+    | { access_token, expires_in } with a read-only browser token, for browser
+    | code that needs a new one without a page load. ?refresh=1 asks for a new
+    | token after Gorilla Dash refused the last one; it is honoured at most once
+    | a minute per site. Rate limited per IP address (requests a minute; 0
+    | turns the limit off).
+    |
+    | An Inertia site does not need it: share GorillaDash::browserToken() as a
+    | prop and reload that prop instead.
+    |
+    */
+    'register_browser_token_route' => (bool) env('GD_WEBSITE_BROWSER_TOKEN_ROUTE', false),
+    'browser_token_path' => env('GD_WEBSITE_BROWSER_TOKEN_PATH', 'gorilla-dash/browser-token'),
+    'browser_token_rate_limit' => (int) env('GD_WEBSITE_BROWSER_TOKEN_RATE_LIMIT', 30),
+
+    /*
+    |--------------------------------------------------------------------------
     | Token early-refresh skew (seconds)
     |--------------------------------------------------------------------------
     |

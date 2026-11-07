@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use GorillaDash\WebsiteSdk\Http\Controllers\BrowserTokenController;
 use GorillaDash\WebsiteSdk\Http\Controllers\ClearCacheController;
 use GorillaDash\WebsiteSdk\Http\Controllers\GraphQlController;
 use Illuminate\Routing\Middleware\ThrottleRequests;
@@ -25,6 +26,21 @@ if (config('website-sdk.register_graphql_route', false)) {
 
     if (($limit = (int) config('website-sdk.graphql_rate_limit', 60)) > 0) {
         $graphqlRoute->middleware(ThrottleRequests::with($limit, 1, 'gd-website-graphql'));
+    }
+}
+
+/*
+| Optional browser-token endpoint (off by default). Answers a read-only token for
+| browser code; ?refresh=1 asks for a new one after Gorilla Dash refused it.
+*/
+if (config('website-sdk.register_browser_token_route', false)) {
+    $browserTokenRoute = Route::get(
+        config('website-sdk.browser_token_path', 'gorilla-dash/browser-token'),
+        BrowserTokenController::class,
+    )->name('gd-website.browser-token');
+
+    if (($limit = (int) config('website-sdk.browser_token_rate_limit', 30)) > 0) {
+        $browserTokenRoute->middleware(ThrottleRequests::with($limit, 1, 'gd-website-browser-token'));
     }
 }
 
