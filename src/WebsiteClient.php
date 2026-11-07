@@ -96,6 +96,32 @@ class WebsiteClient
     }
 
     /**
+     * A read-only token for this website: the one to give the browser, in page
+     * HTML, Inertia props or a browser GraphQL client. It can run public
+     * queries only; server rendering and {@see mutate()} keep the full token.
+     *
+     * Exchanged on `base_uri` (graphql.gorilladash.com by default), never on
+     * `write_base_uri`, and cached until it has ten minutes left.
+     *
+     * @param  bool  $forceRefresh  The browser was refused the last token. Honoured
+     *                              at most once a minute per site.
+     */
+    public function browserToken(bool $forceRefresh = false): string
+    {
+        return $this->tokenManager($this->connection)->getBrowserToken($forceRefresh);
+    }
+
+    /**
+     * As {@see browserToken()}, with the seconds the token has left.
+     *
+     * @return array{access_token: string, expires_in: int}
+     */
+    public function browserTokenWithExpiry(bool $forceRefresh = false): array
+    {
+        return $this->tokenManager($this->connection)->getBrowserTokenWithExpiry($forceRefresh);
+    }
+
+    /**
      * Exchange credentials for a token and run a trivial query. Returns true on
      * success; lets exceptions bubble so callers can show the real error.
      */
@@ -142,9 +168,13 @@ class WebsiteClient
     private function makeTransport(?Connection $connection = null): GraphQlTransport
     {
         $connection ??= $this->connection;
-        $tokenManager = new TokenManager($connection, $this->store(), $this->http);
 
-        return new GraphQlTransport($connection, $tokenManager, $this->http);
+        return new GraphQlTransport($connection, $this->tokenManager($connection), $this->http);
+    }
+
+    private function tokenManager(Connection $connection): TokenManager
+    {
+        return new TokenManager($connection, $this->store(), $this->http);
     }
 
     private function store(): Repository
