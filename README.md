@@ -177,10 +177,11 @@ Two things make it different from `graphql()`:
 
 `GorillaDash::browserToken()` returns a read-only token for this website, to hand to the
 browser. The SDK exchanges the website token for it at `{base_uri}/oauth/website-browser-token`
-and caches it until it has ten minutes left, so Gorilla Dash is asked about once an hour
-rather than on every page view. Pages rendered at the same moment share one exchange (a
-cache lock), which matters because the exchange accepts at most 60 requests a minute from
-each website.
+and keeps it until it expires, asking for a new one once it has less than ten minutes left. A
+token lasts an hour, so while the exchange works Gorilla Dash is asked about once every fifty
+minutes, not on every page view; while it fails, it is asked at most once every 30 seconds
+(see below). Pages rendered at the same moment share one exchange (a cache lock), which
+matters because the exchange accepts at most 60 requests a minute from each website.
 
 ```php
 $token = GorillaDash::browserToken();
@@ -195,17 +196,29 @@ for code that already injects it.
 
 Things worth knowing:
 
+- **A slow or failing Gorilla Dash does not hold up your pages.** The browser token is read
+  on every page render, so:
+  - the exchange gives up after 3 seconds (2 to connect), and a website token minted on the
+    way after 5 (2 to connect), whatever `http_timeout` says;
+  - a page that finds another request exchanging gets the previous token straight away while
+    it is still valid, and waits (up to 5 seconds) only when there is no valid token at all;
+  - a failed exchange is reported once, and for the next 30 seconds nothing is exchanged, a
+    forced refresh included. Meanwhile the previous token is returned while it is still
+    valid, and `GdRequestException` is thrown only when there is none. Wrap the call in
+    `rescue()` if a page should render without it.
 - **The exchange always goes to `base_uri`**, never to `write_base_uri`. Only
   `graphql.gorilladash.com`, the default `base_uri`, serves it; a site whose `base_uri` points
-  at another host gets a `GdRequestException` naming the host.
+  at another host gets a `GdRequestException` naming the host, at most once every 30 seconds,
+  and no new website tokens are minted for it.
+- **Only a read-only token is handed out.** The answer must carry `data.scope` =
+  `website:read`; anything else is treated as a failed exchange.
 - **Pass `forceRefresh: true` when Gorilla Dash refused the last browser token** (the API
   Access Token was regenerated, or the token was revoked). It is honoured at most once a
   minute per site, so a visitor cannot use it to spend the exchange budget; within that
   minute the cached token is returned.
-- **A refused website token is recovered once.** When the exchange answers 401 or 404, the SDK
-  forgets the cached website token, mints a new one and tries the exchange again. If that is
-  refused too, it throws `GdRequestException`, and it mints at most one new website token a
-  minute this way.
+- **A refused website token is recovered once.** When the exchange answers 401 (or 404 from
+  `graphql.gorilladash.com`), the SDK forgets the cached website token, mints a new one and
+  tries the exchange again. If that is refused too, the exchange has failed, as above.
 - **A browser token can only run public queries.** Run mutations with `mutate()` and anything
   that needs the full token with `graphql()`, on your server.
 
@@ -271,8 +284,7 @@ curl -X POST https://your-site.test/graphql \
 # => { "data": { "websiteInfo": {...} }, "cached_at": 1718..., "age": 0, "status": "miss" }
 ```
 
-It sends the request to Gorilla Dash with the **full website token**, on behalf of anyone who
-can reach your site, so:
+It answers anyone who can reach your site, so:
 
 - **It is off unless you set `GD_WEBSITE_GRAPHQL_ROUTE=true`.** Before 0.6.0 it was on by
   default. A site that published `config/website-sdk.php` keeps whatever that file says:
@@ -281,9 +293,14 @@ can reach your site, so:
 - **It runs queries only.** A document that defines a mutation or a subscription is refused
   with `403` and a GraphQL-style `errors` body before anything is sent; a body without a
   well-formed query gets `400`. Send mutations from your server with `mutate()`.
+- **It runs them with the read-only browser token**, so it can read only what the website
+  shows the public, with the browser token's limits. Its answers are cached apart from your
+  server's own `graphql()` reads, which keep the full token. Gorilla Dash sees your
+  server, not the visitor, as the caller, so any per-visitor limit it applies counts every
+  visitor of the proxy together.
 - **It is rate limited per IP address**, 60 requests a minute by default
-  (`GD_WEBSITE_GRAPHQL_RATE_LIMIT`, `0` for no limit). A site behind a proxy or CDN needs
-  trusted proxies configured, or every visitor shares the proxy's address.
+  (`GD_WEBSITE_GRAPHQL_RATE_LIMIT`, `0` for no limit). See the note on visitor addresses
+  below.
 
 Browser code that queries Gorilla Dash is usually better served by a
 [browser token](#browser-tokens) sent straight to `base_uri`.
@@ -303,6 +320,12 @@ Add `?refresh=1` when Gorilla Dash refused the last token; the forced refresh is
 most once a minute per site, and the cached token is returned otherwise. When no token can be
 had it answers `503` with a JSON `message`. It is rate limited per IP address, 30 requests a
 minute by default (`GD_WEBSITE_BROWSER_TOKEN_RATE_LIMIT`).
+
+> **Per-IP limits need the visitor's address.** Both limits above count requests per IP
+> address as Laravel sees it. Behind a load balancer, a CDN or Cloudflare, that is the
+> balancer's address unless the site trusts the proxy (`trustProxies`) or reads the visitor
+> address the CDN passes on (for example `CF-Connecting-IP`). Without that, every visitor
+> shares one counter and the per-IP limit becomes a limit for the whole site.
 
 ### Cache-clear webhook
 

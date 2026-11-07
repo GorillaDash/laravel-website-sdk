@@ -22,13 +22,22 @@ release (0.5 → 0.6) may break things and a site on `^0.5` does not pick it up 
   browser sees: page HTML, Inertia props, a browser Apollo client. `browserTokenWithExpiry()` /
   `getBrowserTokenWithExpiry()` also return the seconds it has left. The website token stays on
   the server, for server rendering and `mutate()`.
-  - Exchanged at `{base_uri}/oauth/website-browser-token` (never `write_base_uri`), cached
-    under its own key until it has ten minutes left, and shared between concurrent requests
-    through a cache lock.
-  - A 401 or 404 from the exchange means the website token was refused: it is forgotten, a new
-    one minted and the exchange retried once (at most one such re-mint a minute per site).
+  - Exchanged at `{base_uri}/oauth/website-browser-token` (never `write_base_uri`), stored
+    under its own key until it expires and refreshed once it has less than ten minutes left,
+    with one exchange shared between concurrent requests through a cache lock.
+  - Only a token answered in the responder envelope with `data.scope` = `website:read` is
+    accepted.
+  - Built for being read on every page render: the exchange times out after 3 seconds (2 to
+    connect), a request that finds another one exchanging gets the previous token at once,
+    and a failed exchange is reported once and starts a 30-second back-off during which no
+    exchange is made. Meanwhile the previous token is returned while valid;
+    `GdRequestException` is thrown only when there is none.
+  - A 401 from the exchange, or a 404 from `graphql.gorilladash.com`, means the website token
+    was refused: it is forgotten, a new one minted and the exchange retried once. A 404 from
+    any other host fails without minting.
   - `forceRefresh: true`, for when Gorilla Dash refused the last browser token, is honoured at
-    most once a minute per site; otherwise the cached token is returned.
+    most once a minute per site, and not during the back-off; otherwise the cached token is
+    returned.
 - **Optional browser-token route** for sites without Inertia: `GET /gorilla-dash/browser-token`
   answers `{ access_token, expires_in }` with `Cache-Control: no-store, private`;
   `?refresh=1` forces a refresh. Off unless `GD_WEBSITE_BROWSER_TOKEN_ROUTE=true`; rate limited
@@ -41,8 +50,13 @@ release (0.5 → 0.6) may break things and a site on `^0.5` does not pick it up 
   subscription is refused with `403` before anything is sent, and a body without a well-formed
   query with `400`, so a site that turns the proxy on cannot be used to submit enquiries,
   reviews or orders with its website token.
+- **The GraphQL proxy queries with the read-only browser token**, not the website token, so it
+  can read only what the website shows the public. Its answers are cached apart from server
+  reads (`browserGraphqlWithMeta()`, cache namespace `browser-data`).
 - **The GraphQL proxy is rate limited per IP address**, 60 requests a minute by default
-  (`GD_WEBSITE_GRAPHQL_RATE_LIMIT`, `0` for no limit).
+  (`GD_WEBSITE_GRAPHQL_RATE_LIMIT`, `0` for no limit). Like the browser-token route's limit, it
+  becomes a site-wide limit on a site that sees its load balancer's address instead of the
+  visitor's.
 
 ### Upgrading from 0.5
 
