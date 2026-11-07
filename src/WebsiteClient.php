@@ -77,6 +77,28 @@ class WebsiteClient
     }
 
     /**
+     * As {@see graphqlWithMeta()}, but run with the read-only browser token, so
+     * it can read only what the website shows the public. For answering the
+     * browser: the GraphQL proxy route uses it. Its answers are cached apart
+     * from server reads, so neither is ever served the other's.
+     *
+     * @param  array<string, mixed>  $variables
+     * @return array{data: array<string, mixed>, cached_at: int, age: int, status: string}
+     */
+    public function browserGraphqlWithMeta(string|Query|QueryBuilderInterface $query, array $variables = [], ?int $ttl = null): array
+    {
+        $query = $this->normalizeQuery($query);
+        $transport = $this->makeTransport(browserToken: true);
+
+        return $this->makeCache()->remember(
+            ['query' => $query, 'variables' => $variables],
+            fn () => $transport->query($query, $variables),
+            $ttl,
+            namespace: 'browser-data',
+        );
+    }
+
+    /**
      * Run a GraphQL mutation (or any query that must NOT be cached) straight
      * through the transport — no SWR cache read, no background refresh. Use
      * this for form submissions, bookings and anything with side effects:
@@ -165,11 +187,11 @@ class WebsiteClient
         return $this->cache ??= new SwrCache($this->connection, $this->store(), $this->refresher);
     }
 
-    private function makeTransport(?Connection $connection = null): GraphQlTransport
+    private function makeTransport(?Connection $connection = null, bool $browserToken = false): GraphQlTransport
     {
         $connection ??= $this->connection;
 
-        return new GraphQlTransport($connection, $this->tokenManager($connection), $this->http);
+        return new GraphQlTransport($connection, $this->tokenManager($connection), $this->http, $browserToken);
     }
 
     private function tokenManager(Connection $connection): TokenManager

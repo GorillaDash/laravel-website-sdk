@@ -15,10 +15,12 @@ use Illuminate\Http\Request;
  * the stale-while-revalidate cache and returns the full envelope (data + cache
  * metadata: status, age, cached_at).
  *
- * It sends the full website token, so it runs queries only: a document that
- * defines a mutation or a subscription is refused before anything is sent.
- * Mutations go through {@see WebsiteClient::mutate()} from the site's own
- * server code.
+ * It answers anyone who can reach the site, so it runs queries only, with the
+ * read-only browser token: a document that defines a mutation or a
+ * subscription is refused before anything is sent, and Gorilla Dash limits
+ * the rest to what the public can see. Its answers are cached apart from the
+ * site's server reads. Mutations go through {@see WebsiteClient::mutate()} from the
+ * site's own server code.
  */
 class GraphQlController
 {
@@ -35,7 +37,7 @@ class GraphQlController
             return $this->refuse('This endpoint only runs GraphQL queries.', 403);
         }
 
-        $envelope = GorillaDash::graphqlWithMeta(
+        $envelope = GorillaDash::browserGraphqlWithMeta(
             $query,
             (array) $request->input('variables', []),
         );

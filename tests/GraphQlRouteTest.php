@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use GorillaDash\WebsiteSdk\Facades\GorillaDash;
 use Illuminate\Support\Facades\Http;
 
 it('does not register the graphql proxy by default', function () {
@@ -20,6 +21,7 @@ describe('when a site turns the proxy on', function () {
     it('serves graphql over the POST endpoint with the cache envelope', function () {
         Http::fake([
             'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
             'gd.test/graphql' => Http::response(['data' => ['websiteInfo' => ['name' => 'Acme']]]),
         ]);
 
@@ -31,9 +33,47 @@ describe('when a site turns the proxy on', function () {
             ]);
     });
 
+    it('runs the query with the browser token, never the full token', function () {
+        Http::fake([
+            'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
+            'gd.test/graphql' => Http::response(['data' => ['websiteInfo' => ['name' => 'Acme']]]),
+        ]);
+
+        $this->postJson('/graphql', ['query' => '{ websiteInfo { name } }'])->assertOk();
+
+        Http::assertSent(fn ($request) => $request->url() === 'https://gd.test/graphql'
+            && $request->hasHeader('Authorization', 'Bearer browser-1'));
+        Http::assertNotSent(fn ($request) => $request->url() === 'https://gd.test/graphql'
+            && $request->hasHeader('Authorization', 'Bearer tok-1'));
+    });
+
+    it('caches its answers apart from the site\'s server reads', function () {
+        Http::fake([
+            'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
+            'gd.test/graphql' => fn ($request) => Http::response(['data' => ['websiteInfo' => [
+                'name' => $request->hasHeader('Authorization', 'Bearer tok-1') ? 'read with the full token' : 'read with the browser token',
+            ]]]),
+        ]);
+        $query = '{ websiteInfo { name } }';
+
+        expect(GorillaDash::graphqlWithMeta($query))
+            ->toMatchArray(['status' => 'miss', 'data' => ['websiteInfo' => ['name' => 'read with the full token']]]);
+
+        $this->postJson('/graphql', ['query' => $query])
+            ->assertJson(['status' => 'miss', 'data' => ['websiteInfo' => ['name' => 'read with the browser token']]]);
+        $this->postJson('/graphql', ['query' => $query])
+            ->assertJson(['status' => 'fresh', 'data' => ['websiteInfo' => ['name' => 'read with the browser token']]]);
+
+        expect(GorillaDash::graphqlWithMeta($query))
+            ->toMatchArray(['status' => 'fresh', 'data' => ['websiteInfo' => ['name' => 'read with the full token']]]);
+    });
+
     it('passes variables through to the transport', function () {
         Http::fake([
             'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
             'gd.test/graphql' => Http::response(['data' => ['websitePage' => ['name' => 'About']]]),
         ]);
 
@@ -49,6 +89,7 @@ describe('when a site turns the proxy on', function () {
     it('runs a query that only mentions mutation in a comment, a string or a field name', function () {
         Http::fake([
             'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
             'gd.test/graphql' => Http::response(['data' => ['websitePage' => ['name' => 'About']]]),
         ]);
 
@@ -101,6 +142,7 @@ describe('when a site turns the proxy on', function () {
 
         Http::fake([
             'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+            'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
             'gd.test/graphql' => Http::response(['data' => ['websiteInfo' => ['name' => 'Acme']]]),
         ]);
 

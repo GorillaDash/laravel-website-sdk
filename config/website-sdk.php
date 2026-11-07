@@ -146,11 +146,12 @@ return [
     | { query, variables } body through the SWR cache and returns the full
     | envelope (data + cache metadata).
     |
-    | Off by default. It sends the full website token on behalf of anyone who
-    | can reach it, so it runs queries only (mutations and subscriptions get a
-    | 403) and is rate limited per IP address (requests a minute; 0 turns the
-    | limit off). Browser code that queries Gorilla Dash is better served by
-    | a browser token (GorillaDash::browserToken()) sent straight to base_uri.
+    | Off by default. It answers anyone who can reach it, so it runs queries
+    | only (mutations and subscriptions get a 403), sends them with the
+    | read-only browser token, caches them apart from server reads, and is rate
+    | limited per IP address (requests a minute; 0 turns the limit off).
+    | Browser code that queries Gorilla Dash is better served by a browser
+    | token (GorillaDash::browserToken()) sent straight to base_uri.
     |
     */
     'register_graphql_route' => (bool) env('GD_WEBSITE_GRAPHQL_ROUTE', false),

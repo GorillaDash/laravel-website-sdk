@@ -6,7 +6,6 @@ use GorillaDash\WebsiteSdk\Connection;
 use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
 use GorillaDash\WebsiteSdk\Facades\GorillaDash;
 use GorillaDash\WebsiteSdk\TokenManager;
-use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\Lock;
@@ -20,30 +19,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Sleep;
-
-/**
- * The responder envelope the browser-token endpoint answers with.
- *
- * @return array<string, mixed>
- */
-function browserTokenBody(string $token, int $expiresIn = 3600): array
-{
-    return [
-        'status' => 201,
-        'success' => true,
-        'data' => [
-            'token_type' => 'Bearer',
-            'scope' => 'website:read',
-            'access_token' => $token,
-            'expires_in' => $expiresIn,
-        ],
-    ];
-}
-
-function browserTokenResponse(string $token, int $expiresIn = 3600): PromiseInterface
-{
-    return Http::response(browserTokenBody($token, $expiresIn), 201);
-}
 
 /**
  * @return Collection<int, Request>

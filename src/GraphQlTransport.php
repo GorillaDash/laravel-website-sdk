@@ -11,7 +11,8 @@ use Throwable;
 
 /**
  * Executes GraphQL queries against {base_uri}/graphql using a bearer token from
- * the {@see TokenManager}. Retries once on a 401 with a freshly exchanged token.
+ * the {@see TokenManager}: the full website token, or with $browserToken the
+ * read-only browser token. Retries once on a 401 with a freshly exchanged token.
  */
 class GraphQlTransport
 {
@@ -19,6 +20,7 @@ class GraphQlTransport
         private readonly Connection $connection,
         private readonly TokenManager $tokenManager,
         private readonly HttpFactory $http,
+        private readonly bool $browserToken = false,
     ) {}
 
     /**
@@ -27,12 +29,11 @@ class GraphQlTransport
      */
     public function query(string $query, array $variables = []): array
     {
-        $response = $this->send($query, $variables, $this->tokenManager->getToken());
+        $response = $this->send($query, $variables, $this->token());
 
         // A rejected token: drop it and retry once with a fresh one.
         if ($response->status() === 401) {
-            $this->tokenManager->forget();
-            $response = $this->send($query, $variables, $this->tokenManager->getToken(forceRefresh: true));
+            $response = $this->send($query, $variables, $this->token(refused: true));
         }
 
         if ($response->failed()) {
@@ -50,6 +51,19 @@ class GraphQlTransport
         }
 
         return $body['data'] ?? [];
+    }
+
+    private function token(bool $refused = false): string
+    {
+        if ($this->browserToken) {
+            return $this->tokenManager->getBrowserToken(forceRefresh: $refused);
+        }
+
+        if ($refused) {
+            $this->tokenManager->forget();
+        }
+
+        return $this->tokenManager->getToken(forceRefresh: $refused);
     }
 
     /**

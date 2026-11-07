@@ -15,8 +15,8 @@ use Illuminate\Support\Facades\Route;
 
 /*
 | Optional GraphQL proxy (off by default). Runs a POST { query, variables } body
-| through the SWR cache with the full website token, so it refuses anything but
-| a query, and is rate limited per IP address.
+| through the SWR cache with the read-only browser token. It refuses anything
+| but a query, and is rate limited per IP address.
 */
 if (config('website-sdk.register_graphql_route', false)) {
     $graphqlRoute = Route::post(

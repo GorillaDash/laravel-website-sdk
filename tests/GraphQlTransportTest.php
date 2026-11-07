@@ -5,6 +5,7 @@ declare(strict_types=1);
 use GorillaDash\WebsiteSdk\Connection;
 use GorillaDash\WebsiteSdk\Exceptions\GdRequestException;
 use GorillaDash\WebsiteSdk\WebsiteClient;
+use GraphQL\Mutation;
 use GraphQL\Query;
 use GraphQL\RawObject;
 use GraphQL\Variable;
@@ -40,6 +41,31 @@ it('retries once with a fresh token after a 401', function () {
     // Second GraphQL call carried the freshly re-exchanged token.
     Http::assertSent(fn ($request) => str_ends_with($request->url(), '/graphql')
         && $request->hasHeader('Authorization', 'Bearer tok-2'));
+});
+
+it('retries a refused browser token once with a forced refresh', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+        'gd.test/oauth/website-browser-token' => Http::sequence()
+            ->push(browserTokenBody('browser-1'), 201)
+            ->push(browserTokenBody('browser-2'), 201),
+        'gd.test/graphql' => Http::sequence()
+            ->push(['message' => 'Unauthenticated'], 401)
+            ->push(['data' => ['websiteInfo' => ['id' => '1']]], 200),
+    ]);
+
+    $envelope = app(WebsiteClient::class)->browserGraphqlWithMeta('{ websiteInfo { id } }');
+
+    expect($envelope['data'])->toBe(['websiteInfo' => ['id' => '1']]);
+
+    $reads = collect(Http::recorded())
+        ->map(fn (array $pair) => $pair[0])
+        ->filter(fn ($request) => str_ends_with($request->url(), '/graphql'))
+        ->values();
+
+    expect($reads)->toHaveCount(2)
+        ->and($reads[0]->header('Authorization'))->toBe(['Bearer browser-1'])
+        ->and($reads[1]->header('Authorization'))->toBe(['Bearer browser-2']);
 });
 
 it('accepts an mghoneimy query object and forwards its variables', function () {
@@ -128,7 +154,7 @@ it('mutate() accepts an mghoneimy Mutation object', function () {
         'gd.test/graphql' => Http::response(['data' => ['submitEnquiry' => ['1']]]),
     ]);
 
-    $mutation = (new GraphQL\Mutation('submitEnquiry'))
+    $mutation = (new Mutation('submitEnquiry'))
         ->setVariables([new Variable('email', 'String', true)])
         ->setArguments(['email' => new RawObject('$email')]);
 
