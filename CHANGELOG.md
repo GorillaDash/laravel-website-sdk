@@ -4,6 +4,20 @@ All notable changes to `gorilladash/laravel-website-sdk`. The package is pre-1.0
 release (0.5 → 0.6) may break things and a site on `^0.5` does not pick it up until its
 `composer.json` asks for `^0.6`.
 
+## 0.6.1 — unreleased
+
+### Fixed
+
+- **A website token Gorilla Dash no longer accepts is replaced on a GraphQL 404.** Gorilla Dash
+  answers an unknown, revoked or expired website token with `404`, not `401`, so `mutate()` and
+  server reads kept sending the cached token until it expired. On a `404` from `/graphql` the
+  SDK now retries once: with a token another request has minted since, or with a newly minted
+  one. A mint on this path is tried at most once a minute for each host a site uses, a failed
+  one included. When the new token gets a `404` too, the `404` is not about the token (a
+  deleted website, a disabled organisation, a `base_uri` that serves no GraphQL), and no mint
+  is tried for an hour. A refused token stops the request before anything runs, so the retry
+  cannot file a mutation twice. The browser token is not retried this way.
+
 ## 0.6.0 — unreleased
 
 ### Breaking

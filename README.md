@@ -404,7 +404,10 @@ Your app ──> GorillaDash facade ──> SwrCache ──> (cache hit? serve)
 - `TokenManager` — exchanges client-credentials for the website token and caches it until just
   before expiry; exchanges that for the read-only browser token (`getBrowserToken()`) and
   caches it until it has ten minutes left.
-- `GraphQlTransport` — sends queries with the bearer token; retries once on a 401 with a fresh token.
+- `GraphQlTransport` — sends queries with the bearer token; retries once on a 401 with a fresh
+  token, and once on a 404 to the website token (how Gorilla Dash refuses a revoked or expired
+  one). A mint on a 404 is tried at most once a minute per host, and not for an hour after a
+  new token was refused too.
 - `SwrCache` — the stale-while-revalidate logic; schedules background refreshes via the
   application's `terminating` callbacks (runs after the response is sent).
 - `mutate()` skips `SwrCache` and sends straight through `GraphQlTransport`, on a connection
