@@ -9,6 +9,7 @@ use GraphQL\Mutation;
 use GraphQL\Query;
 use GraphQL\RawObject;
 use GraphQL\Variable;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
 it('raises a typed exception on GraphQL errors', function () {
@@ -173,4 +174,134 @@ it('reads a blank write host as none, and trims its trailing slash', function ()
         ->toBe('https://api.gd.test')
         ->and(Connection::fromConfig(['base_uri' => 'https://gd.test'])->with(['write_base_uri' => 'https://api.gd.test'])->forWrites()->baseUri)
         ->toBe('https://api.gd.test');
+});
+
+it('mutate() mints a new token and retries once when the write host refuses the cached one with a 404', function () {
+    config(['website-sdk.write_base_uri' => 'https://writes.test']);
+    app()->forgetInstance(WebsiteClient::class);
+
+    Http::fake([
+        'writes.test/oauth/token' => Http::sequence()
+            ->push(['access_token' => 'revoked-token', 'expires_in' => 3600])
+            ->push(['access_token' => 'fresh-token', 'expires_in' => 3600]),
+        'writes.test/graphql' => Http::sequence()
+            ->push(['message' => ''], 404)
+            ->push(['data' => ['submitEnquiry' => ['1']]]),
+    ]);
+
+    $data = app(WebsiteClient::class)->mutate('mutation { submitEnquiry }');
+
+    expect($data)->toBe(['submitEnquiry' => ['1']]);
+
+    $sent = collect(Http::recorded())->map(fn (array $pair) => $pair[0]);
+
+    expect($sent->filter(fn ($request) => str_ends_with($request->url(), '/oauth/token')))->toHaveCount(2)
+        ->and($sent->filter(fn ($request) => str_ends_with($request->url(), '/graphql'))->map(fn ($request) => $request->header('Authorization'))->values()->all())
+        ->toBe([['Bearer revoked-token'], ['Bearer fresh-token']]);
+});
+
+/** How many times the website token endpoint was asked for a token. */
+function mintAttempts(): int
+{
+    return collect(Http::recorded())
+        ->filter(fn (array $pair) => str_ends_with($pair[0]->url(), '/oauth/token'))
+        ->count();
+}
+
+it('tries a mint after a GraphQL 404 at most once a minute, a failed one included', function () {
+    // The client secret was rotated with the revocation, so the new mint is refused too.
+    Http::fake([
+        'gd.test/oauth/token' => Http::sequence()
+            ->push(['access_token' => 'revoked-token', 'expires_in' => 3600])
+            ->whenEmpty(Http::response(['error' => 'invalid_client'], 401)),
+        'gd.test/graphql' => Http::response(['message' => ''], 404),
+    ]);
+
+    $client = app(WebsiteClient::class);
+
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))->toThrow(GdRequestException::class);
+    expect(mintAttempts())->toBe(2);
+
+    // Within the minute, the next 404 fails at once, without asking for a token.
+    $this->travel(59)->seconds();
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))
+        ->toThrow(GdRequestException::class, 'GorillaDash GraphQL request failed with HTTP 404.');
+    expect(mintAttempts())->toBe(2);
+
+    $this->travel(2)->seconds();
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))->toThrow(GdRequestException::class);
+    expect(mintAttempts())->toBe(3);
+});
+
+it('stops minting after a 404 for an hour once a new token is refused too', function () {
+    // A deleted website or a disabled organisation: every token gets a 404.
+    Http::fake([
+        'gd.test/oauth/token' => Http::sequence()
+            ->push(['access_token' => 'tok-1', 'expires_in' => 1296000])
+            ->push(['access_token' => 'tok-2', 'expires_in' => 1296000])
+            ->push(['access_token' => 'tok-3', 'expires_in' => 1296000]),
+        'gd.test/graphql' => Http::response(['message' => ''], 404),
+    ]);
+
+    $client = app(WebsiteClient::class);
+
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))
+        ->toThrow(GdRequestException::class, 'GorillaDash GraphQL request failed with HTTP 404.');
+    expect(mintAttempts())->toBe(2);
+
+    $this->travel(3599)->seconds();
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))->toThrow(GdRequestException::class);
+    expect(mintAttempts())->toBe(2);
+
+    $this->travel(2)->seconds();
+    expect(fn () => $client->mutate('mutation { submitEnquiry }'))->toThrow(GdRequestException::class);
+    expect(mintAttempts())->toBe(3);
+});
+
+it('retries a GraphQL 404 with the token another request has minted since, without minting', function () {
+    $key = 'gd_website:token:'.app(Connection::class)->fingerprint();
+    Cache::put($key, 'revoked-token', 3600);
+    $graphqlCalls = 0;
+
+    Http::fake(function ($request) use ($key, &$graphqlCalls) {
+        if (str_ends_with($request->url(), '/oauth/token')) {
+            return Http::response(['access_token' => 'unexpected-mint', 'expires_in' => 3600]);
+        }
+
+        if ($graphqlCalls++ === 0) {
+            // Another request re-minted while this one was being refused.
+            Cache::put($key, 'fresh-token', 3600);
+
+            return Http::response(['message' => ''], 404);
+        }
+
+        return Http::response(['data' => ['submitEnquiry' => ['1']]]);
+    });
+
+    $data = app(WebsiteClient::class)->mutate('mutation { submitEnquiry }');
+
+    expect($data)->toBe(['submitEnquiry' => ['1']]);
+    Http::assertNotSent(fn ($request) => str_ends_with($request->url(), '/oauth/token'));
+    Http::assertSent(fn ($request) => str_ends_with($request->url(), '/graphql')
+        && $request->hasHeader('Authorization', 'Bearer fresh-token'));
+});
+
+it('does not retry a 404 to the browser token, with any token', function () {
+    Http::fake([
+        'gd.test/oauth/token' => Http::response(['access_token' => 'tok-1', 'expires_in' => 3600]),
+        'gd.test/oauth/website-browser-token' => browserTokenResponse('browser-1'),
+        'gd.test/graphql' => Http::response(['message' => ''], 404),
+    ]);
+
+    expect(fn () => app(WebsiteClient::class)->browserGraphqlWithMeta('{ websiteInfo { id } }'))
+        ->toThrow(GdRequestException::class, 'GorillaDash GraphQL request failed with HTTP 404.');
+
+    // The browser's query must never be resent with the website token.
+    expect(collect(Http::recorded())
+        ->map(fn (array $pair) => $pair[0])
+        ->filter(fn ($request) => str_ends_with($request->url(), '/graphql'))
+        ->map(fn ($request) => $request->header('Authorization'))
+        ->values()
+        ->all())->toBe([['Bearer browser-1']])
+        ->and(mintAttempts())->toBe(1);
 });
