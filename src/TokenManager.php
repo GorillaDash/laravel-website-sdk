@@ -43,6 +43,12 @@ class TokenManager
      */
     private const BROWSER_TOKEN_REFRESH_BEFORE = 600;
 
+    /** At most one website-token mint after a GraphQL 404, per host a site uses, in this many seconds. */
+    private const NOT_FOUND_REMINT_SECONDS = 60;
+
+    /** How long minting after a GraphQL 404 stays off once a new token was refused too. */
+    private const NOT_FOUND_REMINT_HOLD_SECONDS = 3600;
+
     /** At most one forced browser-token refresh per site in this many seconds. */
     private const BROWSER_TOKEN_FORCED_REFRESH_SECONDS = 60;
 
@@ -85,11 +91,48 @@ class TokenManager
     }
 
     /**
-     * Forget the cached token (used after the API rejects it with a 401).
+     * Forget the cached token (used after the API refuses it).
      */
     public function forget(): void
     {
         $this->cache->forget($this->cacheKey());
+    }
+
+    /**
+     * A token to retry with after GorillaDash answered 404 to $refused.
+     *
+     * GorillaDash answers 404, not 401, to a website token it does not accept:
+     * unknown, revoked or expired. It also answers 404 when no token can help:
+     * the website is deleted or its organisation disabled, or base_uri serves no
+     * GraphQL. So this tries a mint at most once a minute per host, and not at
+     * all while {@see holdMintAfterNotFound()} holds it. The refused token stays
+     * cached until a mint succeeds, so a failed mint is held to the same pace. A
+     * token another request has minted since $refused is returned without
+     * minting. Null means there is nothing new to retry with.
+     */
+    public function replaceAfterNotFound(string $refused): ?string
+    {
+        $key = $this->cacheKey();
+        $cached = $this->cache->get($key);
+
+        if (is_string($cached) && $cached !== '' && $cached !== $refused) {
+            return $cached;
+        }
+
+        if (! $this->cache->add($key.':remint', true, self::NOT_FOUND_REMINT_SECONDS)) {
+            return null;
+        }
+
+        return $this->getToken(forceRefresh: true);
+    }
+
+    /**
+     * Stop minting after a 404 for an hour: the token {@see replaceAfterNotFound()}
+     * gave was refused too, so the 404 is not about the token.
+     */
+    public function holdMintAfterNotFound(): void
+    {
+        $this->cache->put($this->cacheKey().':remint', true, self::NOT_FOUND_REMINT_HOLD_SECONDS);
     }
 
     /**

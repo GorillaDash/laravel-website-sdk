@@ -12,7 +12,11 @@ use Throwable;
 /**
  * Executes GraphQL queries against {base_uri}/graphql using a bearer token from
  * the {@see TokenManager}: the full website token, or with $browserToken the
- * read-only browser token. Retries once on a 401 with a freshly exchanged token.
+ * read-only browser token. Retries once on a 401 with a freshly exchanged token,
+ * and, with the website token, once on a 404, which is how GorillaDash refuses
+ * a revoked or expired one (see {@see TokenManager::replaceAfterNotFound()}).
+ * A refused token stops the request before anything runs, so the retry cannot
+ * file a mutation twice.
  */
 class GraphQlTransport
 {
@@ -29,11 +33,22 @@ class GraphQlTransport
      */
     public function query(string $query, array $variables = []): array
     {
-        $response = $this->send($query, $variables, $this->token());
+        $token = $this->token();
+        $response = $this->send($query, $variables, $token);
 
         // A rejected token: drop it and retry once with a fresh one.
         if ($response->status() === 401) {
             $response = $this->send($query, $variables, $this->token(refused: true));
+        } elseif ($response->status() === 404 && ! $this->browserToken) {
+            $replacement = $this->tokenManager->replaceAfterNotFound($token);
+
+            if ($replacement !== null) {
+                $response = $this->send($query, $variables, $replacement);
+
+                if ($response->status() === 404) {
+                    $this->tokenManager->holdMintAfterNotFound();
+                }
+            }
         }
 
         if ($response->failed()) {
